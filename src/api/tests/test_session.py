@@ -101,6 +101,9 @@ class FakeASR:
     async def disconnect(self) -> None:
         pass
 
+    async def warmup(self) -> None:
+        pass
+
     async def start_stream(self, stream_id: str) -> None:
         pass
 
@@ -113,6 +116,9 @@ class FakeASR:
 
 class FakeLLM:
     """Fake LLM provider for testing."""
+
+    last_ttft_ms: float = 0.0
+    last_stream_total_ms: float = 0.0
 
     async def generate_stream(self, messages, system="", tools=None, temperature=0.8, max_tokens=1024):
         for chunk in ["Hello", ", ", "world", "!"]:
@@ -138,6 +144,9 @@ class FakeTTS:
         pass
 
     async def disconnect(self) -> None:
+        pass
+
+    async def warmup(self) -> None:
         pass
 
 

@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `recv()` method on FakeWebSocket test helper for idle timeout compatibility
 
 ### Changed
+- Extracted `ResponseRunner` from `RealtimeSession`: response execution (LLM→tools→TTS→audio events) moved to `server/response_runner.py`, reducing `session.py` from 1,775 to 769 lines
+- Fixed pre-existing test bugs: added missing `warmup()` to FakeASR/FakeTTS and `last_ttft_ms`/`last_stream_total_ms` to FakeLLM
 - Switched default LLM to Qwen3-8B-AWQ: better tool calling accuracy at lower latency than Qwen2.5-14B
 - vLLM provider disables thinking mode (`enable_thinking: False`) to prevent `<think>` blocks in voice responses
 - Filler audio no longer stored in conversation history: prevents LLM from mimicking filler phrases instead of calling tools
