@@ -1,0 +1,13 @@
+# gRPC
+grpcio>=1.78.0
+grpcio-health-checking>=1.78.0
+grpcio-reflection>=1.78.0
+
+# Utils
+numpy>=1.24.0,<3.0.0
+python-dotenv>=1.0.0
+
+# Provider-specific deps: install as needed
+# TTS (Kokoro): pip install kokoro>=0.3.0 soundfile>=0.12.0
+# TTS (Qwen3-TTS): pip install qwen-tts torch
+# TTS (vLLM-Omni): pip install vllm-omni

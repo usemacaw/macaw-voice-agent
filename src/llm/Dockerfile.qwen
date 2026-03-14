@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockerfile LLM Server — vLLM + Qwen2.5-7B-Instruct-AWQ
+# =============================================================================
+# Serves an OpenAI-compatible API with function calling support.
+#
+# Build context: src/
+#   docker build -f llm/Dockerfile.qwen -t llm-server-qwen .
+#
+# Run:
+#   docker run --gpus all -p 8000:8000 llm-server-qwen
+#
+# Requires: NVIDIA GPU with >=6GB VRAM (AWQ 4-bit quantization)
+# =============================================================================
+
+FROM vllm/vllm-openai:v0.8.4 AS base
+
+USER root
+
+# =============================================================================
+# Environment
+# =============================================================================
+ENV MODEL_NAME=Qwen/Qwen2.5-7B-Instruct-AWQ
+ENV VLLM_PORT=8000
+ENV MAX_MODEL_LEN=4096
+ENV GPU_MEMORY_UTILIZATION=0.45
+ENV TENSOR_PARALLEL_SIZE=1
+
+# vLLM tuning
+ENV VLLM_ATTENTION_BACKEND=FLASHINFER
+
+# HuggingFace cache
+ENV HF_HOME=/root/.cache/huggingface
+
+# =============================================================================
+# Pre-download model at build time (avoids 5-10min download on first run)
+# =============================================================================
+RUN python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('Qwen/Qwen2.5-7B-Instruct-AWQ', local_dir_use_symlinks=False)"
+
+# =============================================================================
+# Entrypoint
+# =============================================================================
+EXPOSE ${VLLM_PORT}
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:${VLLM_PORT}/health')" || exit 1
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+CMD ["--model", "Qwen/Qwen2.5-7B-Instruct-AWQ", \
+     "--quantization", "awq", \
+     "--max-model-len", "4096", \
+     "--gpu-memory-utilization", "0.45", \
+     "--port", "8000", \
+     "--trust-remote-code", \
+     "--enable-auto-tool-choice", \
+     "--tool-call-parser", "hermes"]

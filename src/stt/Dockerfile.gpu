@@ -1,0 +1,123 @@
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockerfile STT Server GPU - Qwen3-ASR via vLLM
+# =============================================================================
+# Roda Qwen3-ASR como servico gRPC independente com GPU dedicada.
+#
+# STT: Qwen3-ASR-1.7B via vLLM (streaming incremental)
+#
+# Build:
+#   docker build -f stt-server/Dockerfile.gpu -t stt-server-gpu .
+#
+# Run:
+#   docker run --gpus all -p 50060:50060 stt-server-gpu
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Base vLLM oficial (CUDA 12.9 + PyTorch + vLLM)
+# ---------------------------------------------------------------------------
+FROM vllm/vllm-openai:v0.14.0 AS base
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    openssh-server \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd
+
+# Symlink libcuda stubs para que Triton JIT compile sem erros
+# Em runtime, o NVIDIA Container Toolkit monta a libcuda.so real
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libcuda.so || true
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Dependencias Python
+# ---------------------------------------------------------------------------
+FROM base AS deps
+
+# vLLM audio extras
+RUN uv pip install --system --no-cache "vllm[audio]==0.14.0"
+
+# STT: Qwen3-ASR
+RUN uv pip install --system --no-cache "qwen-asr==0.0.6"
+
+# Flash Attention 2
+RUN MAX_JOBS=4 pip install flash-attn --no-build-isolation
+
+# gRPC + utils
+RUN uv pip install --system --no-cache \
+    "grpcio>=1.78.0" \
+    "grpcio-health-checking>=1.78.0" \
+    "grpcio-reflection>=1.78.0" \
+    "numpy>=1.24.0,<3.0.0" \
+    "python-dotenv>=1.0.0"
+
+# ---------------------------------------------------------------------------
+# Stage 3: Aplicacao
+# ---------------------------------------------------------------------------
+FROM deps AS app
+
+WORKDIR /app
+
+# Modulos compartilhados
+COPY shared/grpc_gen/ ./shared/grpc_gen/
+COPY shared/shared_config/ ./shared/shared_config/
+COPY shared/asp_protocol/ ./shared/asp_protocol/
+
+# Providers do ai-agent (reutiliza implementacoes)
+COPY ai-agent/providers/__init__.py ./providers/__init__.py
+COPY ai-agent/providers/stt.py ./providers/stt.py
+COPY ai-agent/providers/qwen_stt.py ./providers/qwen_stt.py
+COPY ai-agent/providers/audio_utils.py ./providers/audio_utils.py
+COPY ai-agent/providers/executor.py ./providers/executor.py
+COPY ai-agent/config.py ./config.py
+COPY ai-agent/prompts/ ./prompts/
+COPY ai-agent/utils/ ./utils/
+
+# Servidor STT
+COPY stt-server/server.py .
+
+# =============================================================================
+# NVIDIA
+# =============================================================================
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# =============================================================================
+# Variaveis de ambiente
+# =============================================================================
+ENV GRPC_HOST=0.0.0.0
+ENV GRPC_PORT=50060
+ENV LOG_LEVEL=INFO
+
+# STT Qwen3-ASR via vLLM streaming
+ENV STT_PROVIDER=qwen-streaming
+ENV STT_LANGUAGE=pt
+ENV QWEN_STT_MODEL=Qwen/Qwen3-ASR-1.7B
+ENV QWEN_DEVICE=cuda:0
+
+# GPU: usa 80% da VRAM (GPU dedicada so pro STT)
+ENV QWEN_STT_GPU_MEM_UTIL=0.80
+ENV QWEN_STT_ENFORCE_EAGER=true
+ENV VLLM_ENFORCE_EAGER=1
+ENV VLLM_ENABLE_V1_MULTIPROCESSING=0
+ENV VLLM_USE_FLASHINFER_SAMPLER=0
+ENV VLLM_USE_TRITON_FLASH_ATTN=0
+ENV UCX_MEM_MMAP_HOOK_MODE=none
+
+ENV PYTHONPATH=/app:/app/shared
+ENV HF_HOME=/root/.cache/huggingface
+
+EXPOSE 50060
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python3 -c "import grpc; ch=grpc.insecure_channel('localhost:50060'); grpc.channel_ready_future(ch).result(timeout=5)" || exit 1
+
+ENTRYPOINT []
+CMD ["python3", "server.py"]

@@ -1,0 +1,135 @@
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockerfile Combo — STT (Whisper) + TTS (Kokoro) in a single image
+# =============================================================================
+# For Vast.ai single-instance deployment with both services.
+#
+# Build context: src/
+#   docker build -f Dockerfile.combo -t stt-tts-combo .
+#
+# Run:
+#   docker run --gpus all -p 50060:50060 -p 50070:50070 stt-tts-combo
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Base CUDA + Python
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS base
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    espeak-ng \
+    openssh-server \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Python dependencies (STT + TTS)
+# ---------------------------------------------------------------------------
+FROM base AS deps
+
+# Faster-Whisper (STT)
+RUN pip install --no-cache-dir \
+    "faster-whisper>=1.1.0" \
+    "ctranslate2>=4.0.0"
+
+# Kokoro-ONNX (TTS)
+RUN pip install --no-cache-dir \
+    "kokoro-onnx>=0.4.0" \
+    "numpy>=1.24.0,<3.0.0"
+
+# Replace CPU onnxruntime with GPU version
+RUN pip install --no-cache-dir --force-reinstall "onnxruntime-gpu>=1.18.0"
+
+# gRPC + utils (shared)
+RUN pip install --no-cache-dir \
+    "grpcio>=1.78.0" \
+    "grpcio-health-checking>=1.78.0" \
+    "grpcio-reflection>=1.78.0" \
+    "python-dotenv>=1.0.0"
+
+# ---------------------------------------------------------------------------
+# Stage 3: Application
+# ---------------------------------------------------------------------------
+FROM deps AS app
+
+WORKDIR /app
+
+# Shared modules
+COPY shared/ ./shared/
+COPY common/ ./common/
+
+# STT providers + server
+COPY stt/ ./stt/
+
+# TTS providers + server
+COPY tts/ ./tts/
+
+# Pre-download Whisper model at build time (avoids 30s+ download on first run)
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')"
+
+# Download Kokoro models at build time
+RUN mkdir -p models/kokoro && \
+    wget -q "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx" \
+        -O models/kokoro/kokoro-v1.0.onnx && \
+    wget -q "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin" \
+        -O models/kokoro/voices-v1.0.bin
+
+# Entrypoint script that starts both services
+COPY entrypoint-combo.sh /app/entrypoint-combo.sh
+RUN chmod +x /app/entrypoint-combo.sh
+
+# =============================================================================
+# NVIDIA
+# =============================================================================
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# =============================================================================
+# Environment — STT (Whisper)
+# =============================================================================
+ENV STT_PROVIDER=whisper
+ENV STT_LANGUAGE=pt
+ENV WHISPER_MODEL=large-v3-turbo
+ENV WHISPER_DEVICE=cuda
+ENV WHISPER_COMPUTE_TYPE=int8
+ENV WHISPER_BEAM_SIZE=1
+ENV WHISPER_VAD_FILTER=true
+
+# =============================================================================
+# Environment — TTS (Kokoro)
+# =============================================================================
+ENV TTS_PROVIDER=kokoro
+ENV TTS_LANGUAGE=pt
+ENV KOKORO_MODEL_DIR=/app/models/kokoro
+ENV KOKORO_VOICE=pf_dora
+ENV KOKORO_SPEED=1.0
+ENV KOKORO_LANG=pt-br
+ENV ONNX_PROVIDER=CUDAExecutionProvider
+
+# =============================================================================
+# Common
+# =============================================================================
+ENV LOG_LEVEL=INFO
+ENV PYTHONPATH=/app
+ENV HF_HOME=/root/.cache/huggingface
+
+EXPOSE 50060 50070
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python3 -c "import grpc; ch1=grpc.insecure_channel('localhost:50060'); ch2=grpc.insecure_channel('localhost:50070'); grpc.channel_ready_future(ch1).result(timeout=5); grpc.channel_ready_future(ch2).result(timeout=5)" || exit 1
+
+ENTRYPOINT []
+CMD ["/app/entrypoint-combo.sh"]

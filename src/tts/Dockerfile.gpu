@@ -1,0 +1,121 @@
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockerfile TTS Server GPU - Qwen3-TTS via faster-qwen3-tts
+# =============================================================================
+# Roda Qwen3-TTS como servico gRPC independente com GPU dedicada.
+#
+# TTS: Qwen3-TTS-1.7B via faster-qwen3-tts (streaming real + CUDA graphs)
+#
+# Build:
+#   docker build -f tts-server/Dockerfile.gpu -t tts-server-gpu .
+#
+# Run:
+#   docker run --gpus all -p 50070:50070 tts-server-gpu
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Base vLLM oficial
+# ---------------------------------------------------------------------------
+FROM vllm/vllm-openai:v0.14.0 AS base
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ffmpeg \
+    espeak-ng \
+    sox \
+    openssh-server \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd
+
+# Symlink libcuda stubs para que Triton JIT compile sem erros
+RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libcuda.so || true
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Dependencias Python
+# ---------------------------------------------------------------------------
+FROM base AS deps
+
+# vLLM audio extras
+RUN uv pip install --system --no-cache "vllm[audio]==0.14.0"
+
+# TTS: faster-qwen3-tts (streaming real + CUDA graphs)
+RUN uv pip install --system --no-cache "faster-qwen3-tts"
+
+# SoX Python binding
+RUN uv pip install --system --no-cache "sox"
+
+# Flash Attention 2
+RUN MAX_JOBS=4 pip install flash-attn --no-build-isolation
+
+# gRPC + utils
+RUN uv pip install --system --no-cache \
+    "grpcio>=1.78.0" \
+    "grpcio-health-checking>=1.78.0" \
+    "grpcio-reflection>=1.78.0" \
+    "numpy>=1.24.0,<3.0.0" \
+    "python-dotenv>=1.0.0"
+
+# ---------------------------------------------------------------------------
+# Stage 3: Aplicacao
+# ---------------------------------------------------------------------------
+FROM deps AS app
+
+WORKDIR /app
+
+# Modulos compartilhados
+COPY shared/grpc_gen/ ./shared/grpc_gen/
+COPY shared/shared_config/ ./shared/shared_config/
+COPY shared/asp_protocol/ ./shared/asp_protocol/
+
+# Providers do ai-agent (reutiliza implementacoes)
+COPY ai-agent/providers/__init__.py ./providers/__init__.py
+COPY ai-agent/providers/tts.py ./providers/tts.py
+COPY ai-agent/providers/faster_tts.py ./providers/faster_tts.py
+COPY ai-agent/providers/audio_utils.py ./providers/audio_utils.py
+COPY ai-agent/providers/executor.py ./providers/executor.py
+COPY ai-agent/config.py ./config.py
+COPY ai-agent/configs/ ./configs/
+COPY ai-agent/prompts/ ./prompts/
+COPY ai-agent/utils/ ./utils/
+
+# Servidor TTS
+COPY tts-server/server.py .
+
+# =============================================================================
+# NVIDIA
+# =============================================================================
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# =============================================================================
+# Variaveis de ambiente
+# =============================================================================
+ENV GRPC_HOST=0.0.0.0
+ENV GRPC_PORT=50070
+ENV LOG_LEVEL=INFO
+
+# TTS Qwen3-TTS via faster-qwen3-tts
+ENV TTS_PROVIDER=faster
+ENV TTS_LANGUAGE=pt
+ENV QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+ENV QWEN_TTS_SPEAKER=Ryan
+ENV FASTER_TTS_CHUNK_SIZE=4
+
+ENV PYTHONPATH=/app:/app/shared
+ENV HF_HOME=/root/.cache/huggingface
+
+EXPOSE 50070
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python3 -c "import grpc; ch=grpc.insecure_channel('localhost:50070'); grpc.channel_ready_future(ch).result(timeout=5)" || exit 1
+
+ENTRYPOINT []
+CMD ["python3", "server.py"]

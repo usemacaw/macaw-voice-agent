@@ -1,0 +1,100 @@
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockerfile STT Server GPU — Faster-Whisper (CTranslate2)
+# =============================================================================
+# Build context: src/
+#   docker build -f stt/Dockerfile.whisper -t stt-server-whisper .
+#
+# Run:
+#   docker run --gpus all -p 50060:50060 stt-server-whisper
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Base CUDA + Python
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS base
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    openssh-server \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/run/sshd \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Python dependencies
+# ---------------------------------------------------------------------------
+FROM base AS deps
+
+# Faster-Whisper (CTranslate2 backend, CUDA-optimized)
+RUN pip install --no-cache-dir \
+    "faster-whisper>=1.1.0" \
+    "ctranslate2>=4.0.0"
+
+# gRPC + utils
+RUN pip install --no-cache-dir \
+    "grpcio>=1.78.0" \
+    "grpcio-health-checking>=1.78.0" \
+    "grpcio-reflection>=1.78.0" \
+    "numpy>=1.24.0,<3.0.0" \
+    "python-dotenv>=1.0.0"
+
+# ---------------------------------------------------------------------------
+# Stage 3: Application
+# ---------------------------------------------------------------------------
+FROM deps AS app
+
+WORKDIR /app
+
+# Shared modules
+COPY shared/ ./shared/
+COPY common/ ./common/
+
+# STT providers + server
+COPY stt/ ./stt/
+
+# Pre-download Whisper model at build time (avoids 30s+ download on first run)
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('large-v3-turbo', device='cpu', compute_type='int8')"
+
+# =============================================================================
+# NVIDIA
+# =============================================================================
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# =============================================================================
+# Environment
+# =============================================================================
+ENV GRPC_HOST=0.0.0.0
+ENV GRPC_PORT=50060
+ENV LOG_LEVEL=INFO
+
+# Faster-Whisper config
+ENV STT_PROVIDER=whisper
+ENV STT_LANGUAGE=pt
+ENV WHISPER_MODEL=large-v3-turbo
+ENV WHISPER_DEVICE=cuda
+ENV WHISPER_COMPUTE_TYPE=int8
+ENV WHISPER_BEAM_SIZE=1
+ENV WHISPER_VAD_FILTER=true
+
+ENV PYTHONPATH=/app
+ENV HF_HOME=/root/.cache/huggingface
+
+EXPOSE 50060
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python3 -c "import grpc; ch=grpc.insecure_channel('localhost:50060'); grpc.channel_ready_future(ch).result(timeout=5)" || exit 1
+
+ENTRYPOINT []
+CMD ["python3", "-m", "stt.server"]

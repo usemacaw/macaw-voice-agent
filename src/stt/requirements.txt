@@ -1,0 +1,12 @@
+# gRPC
+grpcio>=1.78.0
+grpcio-health-checking>=1.78.0
+grpcio-reflection>=1.78.0
+
+# Utils
+numpy>=1.24.0,<3.0.0
+python-dotenv>=1.0.0
+
+# Provider-specific deps: install as needed
+# STT (Qwen3-ASR): pip install qwen-asr torch
+# STT (Whisper): pip install faster-whisper>=1.0.0
