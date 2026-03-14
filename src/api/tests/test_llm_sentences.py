@@ -2,7 +2,7 @@
 
 import pytest
 
-from providers.llm import split_long_sentence
+from pipeline.sentence_splitter import split_long_sentence
 
 
 class TestSplitLongSentence:

@@ -19,7 +19,7 @@ import base64
 
 import numpy as np
 
-from audio.utils import pcm_to_float32, float32_to_pcm, resample
+from common.audio_utils import pcm_to_float32, float32_to_pcm, resample
 
 # OpenAI Realtime API uses 24kHz 16-bit mono PCM
 API_SAMPLE_RATE = 24000

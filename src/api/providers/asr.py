@@ -56,6 +56,10 @@ class ASRProvider(ABC):
     async def disconnect(self) -> None:
         """Optional: disconnect from remote service."""
 
+    async def health_check(self) -> bool:
+        """Return True if provider is healthy. Override for custom checks."""
+        return True
+
 
 def register_asr_provider(name: str, cls: type[ASRProvider]) -> None:
     _registry.register(name, cls)

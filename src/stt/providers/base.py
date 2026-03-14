@@ -172,7 +172,6 @@ _KNOWN_STT_MODULES = {
     "qwen": "stt.providers.qwen_stt",
     "qwen-streaming": "stt.providers.qwen_stt",
     "whisper": "stt.providers.whisper_stt",
-    "fastconformer": "stt.providers.fastconformer_stt",
 }
 
 

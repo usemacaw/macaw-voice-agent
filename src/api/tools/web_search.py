@@ -21,14 +21,35 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("open-voice-api.tools.web")
 
-_ddgs = DDGS()
+_ddgs: DDGS | None = None
+_http_client: httpx.AsyncClient | None = None
 
-# Shared async client for fetching pages
-_http_client = httpx.AsyncClient(
-    timeout=5.0,
-    follow_redirects=True,
-    headers={"User-Agent": "Mozilla/5.0 (compatible; OpenVoiceAPI/1.0)"},
-)
+
+def _get_ddgs() -> DDGS:
+    global _ddgs
+    if _ddgs is None:
+        _ddgs = DDGS()
+    return _ddgs
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=5.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; OpenVoiceAPI/1.0)"},
+        )
+    return _http_client
+
+
+async def cleanup_web_search() -> None:
+    """Close module-level singletons. Call on server shutdown."""
+    global _ddgs, _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+    _ddgs = None
 
 # Tags whose content should be completely removed (not just the tags)
 _STRIP_TAGS_RE = re.compile(
@@ -53,7 +74,7 @@ def _html_to_text(raw_html: str, max_chars: int = 800) -> str:
 async def _fetch_page(url: str) -> str:
     """Fetch a URL and extract text content. Returns empty string on failure."""
     try:
-        resp = await _http_client.get(url)
+        resp = await _get_http_client().get(url)
         resp.raise_for_status()
 
         content_type = resp.headers.get("content-type", "")
@@ -82,9 +103,9 @@ async def web_search(query: str, type: str = "general", max_results: int = 2) ->
 
     try:
         if is_news:
-            results = _ddgs.news(query, max_results=max_results, region="br-pt")
+            results = _get_ddgs().news(query, max_results=max_results, region="br-pt")
         else:
-            results = _ddgs.text(query, max_results=max_results, region="br-pt")
+            results = _get_ddgs().text(query, max_results=max_results, region="br-pt")
     except Exception as e:
         logger.error(f"DuckDuckGo search failed: {e}")
         return {"error": "Nao consegui realizar a busca no momento."}

@@ -19,7 +19,7 @@ from typing import AsyncGenerator, Optional, TYPE_CHECKING
 
 from audio.codec import INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH
 from config import PIPELINE
-from providers.llm import split_long_sentence
+from pipeline.sentence_splitter import generate_sentences, split_long_sentence
 
 # Strip emojis from sentences before TTS
 _EMOJI_RE = re.compile(
@@ -195,8 +195,8 @@ class SentencePipeline:
         max_chars = PIPELINE.max_sentence_chars
 
         try:
-            async for sentence in self._llm.generate_sentences(
-                messages, system=system, tools=tools,
+            async for sentence in generate_sentences(
+                self._llm, messages, system=system, tools=tools,
                 temperature=temperature, max_tokens=max_tokens,
             ):
                 sub_sentences = split_long_sentence(sentence, max_chars)

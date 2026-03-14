@@ -75,6 +75,10 @@ class RemoteASR(ASRProvider):
             self._channel = None
             self._stub = None
 
+    async def health_check(self) -> bool:
+        """Check gRPC channel connectivity."""
+        return self._channel is not None and self._stub is not None
+
     async def transcribe(self, audio: bytes) -> str:
         if not self._stub:
             raise RuntimeError("Remote ASR not connected")

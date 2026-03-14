@@ -187,7 +187,7 @@ class TestTTSServerLifecycle:
             server = TTSServer()
             await server.start(host="127.0.0.1", port=0)
 
-            assert server._server is not None
+            assert server._micro._server is not None
             assert server._provider is mock_provider
 
             await server.stop()

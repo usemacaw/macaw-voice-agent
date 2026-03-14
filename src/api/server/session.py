@@ -14,6 +14,7 @@ import json
 import logging
 import time
 import uuid
+from collections import deque
 from typing import TYPE_CHECKING
 
 import websockets.exceptions
@@ -80,17 +81,14 @@ class RealtimeSession:
             instructions=LLM.system_prompt,
             temperature=LLM.temperature,
         )
-        self._items: list[ConversationItem] = []
+        self._items: deque[ConversationItem] = deque(maxlen=_MAX_CONVERSATION_ITEMS)
         self._audio_buffer = bytearray()
         self._emitter = EventEmitter(ws, self.session_id)
 
         # Conversation memory for history search tool
-        # Fork registry so each session has its own recall_memory handler
         self._memory = ConversationMemory()
         if self._tool_registry is not None:
-            self._tool_registry = self._tool_registry.fork()
-            from tools.recall_memory import register_recall_handler
-            register_recall_handler(self._tool_registry, self._memory)
+            self._tool_registry = self._setup_session_tools(self._tool_registry)
 
         # Active response task
         self._response_task: asyncio.Task | None = None
@@ -125,6 +123,13 @@ class RealtimeSession:
 
         # Rate limiting
         self._event_timestamps: list[float] = []
+
+    def _setup_session_tools(self, registry: ToolRegistry) -> ToolRegistry:
+        """Fork the global tool registry and bind per-session tools."""
+        from tools.recall_memory import register_recall_handler
+        forked = registry.fork()
+        register_recall_handler(forked, self._memory)
+        return forked
 
     # ---- Audio Input Callbacks ----
 
@@ -168,7 +173,6 @@ class RealtimeSession:
         Must be called under _state_lock.
         """
         self._items.append(item)
-        self._enforce_items_limit()
 
         # Feed conversation memory for recall_memory tool
         if item.type == "message" and item.role in ("user", "assistant"):
@@ -181,17 +185,7 @@ class RealtimeSession:
             if text.strip():
                 self._memory.add(item.role, text.strip())
 
-    def _enforce_items_limit(self) -> None:
-        """Evict oldest items when conversation exceeds max size.
-
-        Must be called under _state_lock.
-        """
-        while len(self._items) > _MAX_CONVERSATION_ITEMS:
-            evicted = self._items.pop(0)
-            logger.debug(
-                f"[{self.session_id[:8]}] Evicted oldest item {evicted.id[:12]} "
-                f"(items={len(self._items)})"
-            )
+    # deque with maxlen auto-evicts oldest items — no manual enforcement needed
 
     def _check_rate_limit(self) -> bool:
         """Check if client is sending events too fast. Returns True if allowed."""
@@ -431,8 +425,12 @@ class RealtimeSession:
         item_id = data.get("item_id", "")
         async with self._state_lock:
             original_len = len(self._items)
-            self._items = [i for i in self._items if i.id != item_id]
-            found = len(self._items) < original_len
+            filtered = deque(
+                (i for i in self._items if i.id != item_id),
+                maxlen=_MAX_CONVERSATION_ITEMS,
+            )
+            found = len(filtered) < original_len
+            self._items = filtered
         if not found:
             await self._emitter.emit(
                 events.error_event("", f"Item not found: {item_id}", code="item_not_found")

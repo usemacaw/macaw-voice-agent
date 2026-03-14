@@ -12,7 +12,7 @@ from audio.codec import (
     API_SAMPLE_RATE,
     INTERNAL_SAMPLE_RATE,
 )
-from audio.utils import pcm_to_float32, float32_to_pcm, resample
+from common.audio_utils import pcm_to_float32, float32_to_pcm, resample
 
 
 class TestPCMConversion:
@@ -28,7 +28,7 @@ class TestPCMConversion:
         np.testing.assert_allclose(samples, recovered, atol=5e-05)
 
     def test_pcm_to_float32_odd_bytes_raises(self):
-        with pytest.raises(ValueError, match="even byte count"):
+        with pytest.raises(ValueError, match="numero par de bytes|even byte count"):
             pcm_to_float32(b"\x00\x01\x02")
 
     def test_float32_to_pcm_clips(self):

@@ -60,7 +60,7 @@ class WhisperASR(ASRProvider):
         if self._model is None:
             raise RuntimeError("WhisperASR not connected. Call connect() first.")
 
-        from audio.utils import pcm_to_float32, resample
+        from common.audio_utils import pcm_to_float32, resample
 
         t0 = time.perf_counter()
 

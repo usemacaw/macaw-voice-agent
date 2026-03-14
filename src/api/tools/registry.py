@@ -35,7 +35,6 @@ class ToolDef:
     handler: ToolHandlerFn
     schema: dict
     filler_phrase: str = ""
-    requires_confirmation: bool = False
 
 
 class ToolExecutionError(Exception):
@@ -83,7 +82,6 @@ class ToolRegistry:
         handler: ToolHandlerFn,
         schema: dict,
         filler_phrase: str = "",
-        requires_confirmation: bool = False,
     ) -> None:
         """Register a tool for server-side execution.
 
@@ -94,8 +92,6 @@ class ToolRegistry:
             schema: OpenAI function tool schema (type, function, name, description, parameters).
             filler_phrase: Custom filler phrase for TTS while this tool executes.
                           Falls back to default_filler if empty.
-            requires_confirmation: If True, the tool result includes a confirmation
-                                   prompt and the LLM should ask the user to confirm.
         """
         if name in self._tools:
             logger.warning(f"Tool '{name}' already registered — overwriting")
@@ -105,7 +101,6 @@ class ToolRegistry:
             handler=handler,
             schema=schema,
             filler_phrase=filler_phrase,
-            requires_confirmation=requires_confirmation,
         )
         logger.info(f"Tool registered: {name}")
 

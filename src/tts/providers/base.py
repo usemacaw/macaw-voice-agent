@@ -9,10 +9,10 @@ Inclui MockTTS como referencia e para testes sem providers reais.
 
 import importlib
 import logging
-import math
-import struct
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Dict, Type
+
+import numpy as np
 
 from common.config import TTS_CONFIG, AUDIO_CONFIG
 
@@ -108,16 +108,13 @@ class MockTTS(TTSProvider):
         sample_rate = AUDIO_CONFIG["sample_rate"]
         duration = max(1.0, len(text) * 0.05)
         frequency = 440
+        n_samples = int(sample_rate * duration)
 
-        samples = []
-        for i in range(int(sample_rate * duration)):
-            t = i / sample_rate
-            envelope = min(1.0, t * 10) * min(1.0, (duration - t) * 10)
-            raw = int(16000 * envelope * math.sin(2 * math.pi * frequency * i / sample_rate))
-            sample = max(-32768, min(32767, raw))
-            samples.append(struct.pack('<h', sample))
+        t = np.arange(n_samples, dtype=np.float32) / sample_rate
+        envelope = np.minimum(1.0, t * 10) * np.minimum(1.0, (duration - t) * 10)
+        samples = (16000 * envelope * np.sin(2 * np.pi * frequency * t)).astype(np.int16)
 
-        pcm_data = b''.join(samples)
+        pcm_data = samples.tobytes()
         logger.info(f"TTS (mock): {len(pcm_data)} bytes")
         return pcm_data
 

@@ -18,7 +18,7 @@ import logging
 import os
 from typing import AsyncGenerator, TYPE_CHECKING
 
-from audio.utils import float32_to_pcm, resample
+from common.audio_utils import float32_to_pcm, resample
 from config import TTS_CONFIG
 from providers.tts import TTSProvider, register_tts_provider
 

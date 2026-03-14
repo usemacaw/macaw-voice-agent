@@ -4,10 +4,17 @@ Utilitarios de conversao de audio para providers STT/TTS.
 Funcoes puras para converter entre PCM 16-bit e numpy float32,
 e para resample entre sample rates diferentes.
 
-Usa apenas numpy (ja e dependencia do projeto).
+Usa scipy para resampling com anti-aliasing quando disponivel,
+com fallback para interpolacao linear via numpy.
 """
 
 import numpy as np
+
+try:
+    from scipy.signal import resample_poly as _scipy_resample_poly
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
 
 
 def pcm_to_float32(pcm_data: bytes) -> np.ndarray:
@@ -47,7 +54,10 @@ def float32_to_pcm(samples: np.ndarray) -> bytes:
 
 
 def resample(samples: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
-    """Resample via interpolacao linear com numpy.
+    """Resample audio com anti-aliasing quando possivel.
+
+    Usa scipy.signal.resample_poly (filtro polifasico com anti-aliasing)
+    quando disponivel, com fallback para interpolacao linear via numpy.
 
     Args:
         samples: Array de amostras (float32 ou int16).
@@ -59,7 +69,17 @@ def resample(samples: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
     """
     if from_rate == to_rate:
         return samples
+    if len(samples) == 0:
+        return np.array([], dtype=samples.dtype)
 
+    if _HAS_SCIPY:
+        from math import gcd
+        g = gcd(from_rate, to_rate)
+        up = to_rate // g
+        down = from_rate // g
+        return _scipy_resample_poly(samples, up, down).astype(samples.dtype)
+
+    # Fallback: interpolacao linear (sem anti-aliasing)
     duration = len(samples) / from_rate
     target_length = int(duration * to_rate)
 

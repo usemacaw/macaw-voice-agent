@@ -197,7 +197,7 @@ class TestSTTServerLifecycle:
             server = STTServer()
             await server.start(host="127.0.0.1", port=0)  # Porta 0 = aleatorio
 
-            assert server._server is not None
+            assert server._micro._server is not None
             assert server._provider is mock_provider
 
             await server.stop()

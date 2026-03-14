@@ -127,12 +127,12 @@ class AnthropicLLM(LLMProvider):
             async for text in stream.text_stream:
                 if not first_token:
                     first_token = True
-                    ttft_ms = (time.perf_counter() - t0) * 1000
-                    logger.info(f"LLM first token in {ttft_ms:.0f}ms")
+                    self.last_ttft_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(f"LLM first token in {self.last_ttft_ms:.0f}ms")
                 yield text
 
-        total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"LLM stream complete: {total_ms:.0f}ms")
+        self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"LLM stream complete: {self.last_stream_total_ms:.0f}ms")
 
     async def generate_stream_with_tools(
         self,
@@ -167,8 +167,8 @@ class AnthropicLLM(LLMProvider):
             async for event in stream:
                 if not first_token:
                     first_token = True
-                    ttft_ms = (time.perf_counter() - t0) * 1000
-                    logger.info(f"LLM first event in {ttft_ms:.0f}ms")
+                    self.last_ttft_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(f"LLM first event in {self.last_ttft_ms:.0f}ms")
 
                 if event.type == "content_block_start":
                     block = event.content_block
@@ -204,8 +204,8 @@ class AnthropicLLM(LLMProvider):
                         )
                         in_tool_use = False
 
-        total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"LLM stream (with tools) complete: {total_ms:.0f}ms")
+        self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"LLM stream (with tools) complete: {self.last_stream_total_ms:.0f}ms")
 
     async def connect(self) -> None:
         pass

@@ -97,18 +97,17 @@ class WebSocketServer:
     def active_session_count(self) -> int:
         return len(self._active_sessions)
 
-    def _check_provider_health(self) -> dict:
-        """Lightweight provider health check — verifies providers are initialized."""
+    async def _check_provider_health(self) -> dict:
+        """Check provider health via ABC health_check() method."""
         status = {
             "asr": self._asr is not None,
             "llm": self._llm is not None,
             "tts": self._tts is not None,
         }
-        # Check gRPC stub for remote providers
-        if hasattr(self._asr, "_stub"):
-            status["asr_connected"] = self._asr._stub is not None
-        if hasattr(self._tts, "_stub"):
-            status["tts_connected"] = self._tts._stub is not None
+        if self._asr is not None:
+            status["asr_healthy"] = await self._asr.health_check()
+        if self._tts is not None:
+            status["tts_healthy"] = await self._tts.health_check()
         return status
 
     async def _process_request(self, connection: ServerConnection, request):
@@ -118,7 +117,7 @@ class WebSocketServer:
 
         # Health check endpoint (responds before WebSocket upgrade)
         if parsed.path == "/health":
-            provider_health = self._check_provider_health()
+            provider_health = await self._check_provider_health()
             all_healthy = all(provider_health.values())
             return connection.respond(
                 200 if all_healthy else 503,

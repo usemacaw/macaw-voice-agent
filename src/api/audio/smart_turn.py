@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
+from common.audio_utils import resample as _resample_audio
+
 logger = logging.getLogger("open-voice-api.smart-turn")
 
 _MODEL_DIR = Path(__file__).parent / "models"
@@ -72,12 +74,9 @@ class SmartTurnDetector:
 
         # Resample to 16kHz if needed
         if source_sample_rate != _SMART_TURN_SAMPLE_RATE:
-            duration = len(samples) / source_sample_rate
-            target_length = int(duration * _SMART_TURN_SAMPLE_RATE)
-            if target_length == 0:
+            samples = _resample_audio(samples, source_sample_rate, _SMART_TURN_SAMPLE_RATE)
+            if len(samples) == 0:
                 return True, 1.0  # Empty audio = turn complete
-            indices = np.linspace(0, len(samples) - 1, target_length)
-            samples = np.interp(indices, np.arange(len(samples)), samples).astype(np.float32)
 
         # Truncate/pad to last N seconds
         samples = self._truncate_to_last_n_seconds(samples)

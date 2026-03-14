@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
@@ -25,6 +25,7 @@ from pipeline.sentence_pipeline import SentencePipeline
 from protocol import events
 from protocol.event_emitter import SlowClientError
 from protocol.models import ContentPart, ConversationItem
+from server.filler import build_dynamic_filler, send_filler_audio
 
 if TYPE_CHECKING:
     from protocol.event_emitter import EventEmitter
@@ -66,54 +67,6 @@ def _clean_for_voice(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic filler phrases
-# ---------------------------------------------------------------------------
-
-_SEARCH_FILLERS = [
-    ("Vou pesquisar sobre {q}, aguarde.", "Vou pesquisar, aguarde."),
-    ("Deixa eu buscar sobre {q}.", "Deixa eu buscar isso pra você."),
-    ("Vou verificar sobre {q}, um momento.", "Vou verificar, um momento."),
-    ("Vou buscar informações sobre {q}.", "Vou buscar informações pra você."),
-    ("Um momento, vou procurar sobre {q}.", "Um momento, vou procurar."),
-    ("Espere um pouco, vou pesquisar sobre {q}.", "Espere um pouco, vou pesquisar."),
-    ("Aguarde, vou buscar sobre {q}.", "Aguarde, vou buscar."),
-]
-
-_MEMORY_FILLERS = [
-    "Deixa eu verificar, um momento.",
-    "Vou checar, aguarde.",
-    "Um momento, vou lembrar.",
-]
-
-_GENERIC_FILLERS = [
-    "Um momento, por favor.",
-    "Aguarde um instante.",
-    "Só um momento.",
-]
-
-
-def _build_dynamic_filler(tool_name: str, arguments_json: str) -> str:
-    """Build a contextual filler phrase based on tool name and arguments."""
-    try:
-        args = json.loads(arguments_json) if arguments_json else {}
-    except (json.JSONDecodeError, TypeError):
-        args = {}
-
-    if tool_name == "web_search":
-        query = args.get("query", "")
-        with_q, without_q = random.choice(_SEARCH_FILLERS)
-        if query:
-            short = query[:60].rstrip()
-            return with_q.format(q=short)
-        return without_q
-
-    if tool_name == "recall_memory":
-        return random.choice(_MEMORY_FILLERS)
-
-    return random.choice(_GENERIC_FILLERS)
-
-
-# ---------------------------------------------------------------------------
 # Response context (shared session state)
 # ---------------------------------------------------------------------------
 
@@ -122,7 +75,7 @@ def _build_dynamic_filler(tool_name: str, arguments_json: str) -> str:
 class ResponseContext:
     """Mutable session state passed to the response runner."""
 
-    items: list[ConversationItem]
+    items: Sequence[ConversationItem]
     state_lock: asyncio.Lock
     append_item: Callable[[ConversationItem], None]  # must be called under state_lock
     speech_stopped_at: float | None
@@ -473,8 +426,11 @@ class ResponseRunner:
         # Send filler audio for the first tool call
         if has_audio and tool_calls:
             first_tool = tool_calls[0]
-            filler = _build_dynamic_filler(first_tool["name"], first_tool["arguments"])
-            await self._send_filler_audio(response_id, output_index, filler)
+            filler = build_dynamic_filler(first_tool["name"], first_tool["arguments"])
+            await send_filler_audio(
+                self._sid, self._tts, self._emitter, self._config,
+                response_id, output_index, filler,
+            )
 
         for tc in tool_calls:
             tc_id = tc["id"] or f"call_{uuid.uuid4().hex[:12]}"
@@ -553,78 +509,6 @@ class ResponseRunner:
             output_index += 1
 
         return not any_error
-
-    async def _send_filler_audio(
-        self, response_id: str, output_index: int, filler_text: str
-    ) -> None:
-        """Synthesize and send a filler phrase via TTS while tools execute."""
-        try:
-            filler_item_id = f"item_{uuid.uuid4().hex[:24]}"
-            filler_item = ConversationItem(
-                id=filler_item_id,
-                type="message",
-                role="assistant",
-                status="in_progress",
-                content=[ContentPart(type="audio", audio="", transcript="")],
-            )
-            await self._emitter.emit(
-                events.response_output_item_added(
-                    "", response_id, output_index, filler_item
-                )
-            )
-            # NOTE: filler is NOT added to items on purpose.
-            # Storing it would pollute the LLM context.
-
-            if self._tts.supports_streaming:
-                async for chunk in self._tts.synthesize_stream(filler_text):
-                    if chunk:
-                        audio_b64 = encode_audio_for_client(
-                            chunk, self._config.output_audio_format
-                        )
-                        await self._emitter.emit(
-                            events.response_audio_delta(
-                                "", response_id, filler_item_id, output_index, 0,
-                                audio_b64,
-                            )
-                        )
-            else:
-                audio = await self._tts.synthesize(filler_text)
-                if audio:
-                    audio_b64 = encode_audio_for_client(
-                        audio, self._config.output_audio_format
-                    )
-                    await self._emitter.emit(
-                        events.response_audio_delta(
-                            "", response_id, filler_item_id, output_index, 0,
-                            audio_b64,
-                        )
-                    )
-
-            await self._emitter.emit(
-                events.response_audio_transcript_delta(
-                    "", response_id, filler_item_id, output_index, 0, filler_text,
-                )
-            )
-
-            filler_item.content[0] = ContentPart(
-                type="audio", transcript=filler_text
-            )
-            filler_item.status = "completed"
-            await self._emitter.emit(
-                events.response_audio_done(
-                    "", response_id, filler_item_id, output_index, 0
-                )
-            )
-            await self._emitter.emit(
-                events.response_output_item_done(
-                    "", response_id, output_index, filler_item
-                )
-            )
-            logger.info(f"[{self._sid[:8]}] Filler sent: \"{filler_text}\"")
-        except Exception as e:
-            logger.warning(
-                f"[{self._sid[:8]}] Filler TTS failed (non-critical): {e}"
-            )
 
     # ------------------------------------------------------------------
     # Response emission helpers

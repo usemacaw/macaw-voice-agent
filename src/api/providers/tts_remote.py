@@ -70,6 +70,10 @@ class RemoteTTS(TTSProvider):
             self._channel = None
             self._stub = None
 
+    async def health_check(self) -> bool:
+        """Check gRPC channel connectivity."""
+        return self._channel is not None and self._stub is not None
+
     async def synthesize(self, text: str) -> bytes:
         if not self._stub:
             raise RuntimeError("Remote TTS not connected")

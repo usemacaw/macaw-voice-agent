@@ -2,11 +2,13 @@
 Configuration for STT and TTS microservices.
 
 Subset of ai-agent config — only what STT/TTS servers need.
-All values from environment variables.
+All values from environment variables, exposed as frozen dataclasses.
 """
 
 import os
+from dataclasses import dataclass
 from typing import Union
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -62,31 +64,61 @@ LOG_CONFIG = {
 
 
 # =============================================================================
-# AUDIO
+# Typed configuration (frozen dataclasses)
 # =============================================================================
 
+
+@dataclass(frozen=True)
+class AudioConfig:
+    sample_rate: int = 8000
+    channels: int = 1
+    sample_width: int = 2
+
+
+@dataclass(frozen=True)
+class STTConfig:
+    provider: str = "mock"
+    language: str = "pt"
+
+
+@dataclass(frozen=True)
+class TTSConfig:
+    provider: str = "mock"
+    language: str = "pt"
+
+
+AUDIO = AudioConfig(
+    sample_rate=_env_int("AUDIO_SAMPLE_RATE", "8000", min_val=1),
+    channels=_env_int("AUDIO_CHANNELS", "1", min_val=1),
+    sample_width=_env_int("AUDIO_SAMPLE_WIDTH", "2", min_val=1),
+)
+
+STT = STTConfig(
+    provider=os.getenv("STT_PROVIDER", "mock"),
+    language=os.getenv("STT_LANGUAGE", "pt"),
+)
+
+TTS = TTSConfig(
+    provider=os.getenv("TTS_PROVIDER", "mock"),
+    language=os.getenv("TTS_LANGUAGE", os.getenv("TTS_LANG", "pt")),
+)
+
+
+# Legacy dict access — kept for backward compatibility with providers
+# that use AUDIO_CONFIG["sample_rate"] etc. Will be removed once all
+# consumers migrate to AUDIO.sample_rate.
 AUDIO_CONFIG = {
-    "sample_rate": _env_int("AUDIO_SAMPLE_RATE", "8000", min_val=1),
-    "channels": _env_int("AUDIO_CHANNELS", "1", min_val=1),
-    "sample_width": _env_int("AUDIO_SAMPLE_WIDTH", "2", min_val=1),
+    "sample_rate": AUDIO.sample_rate,
+    "channels": AUDIO.channels,
+    "sample_width": AUDIO.sample_width,
 }
-
-
-# =============================================================================
-# STT (Speech-to-Text)
-# =============================================================================
 
 STT_CONFIG = {
-    "provider": os.getenv("STT_PROVIDER", "mock"),
-    "language": os.getenv("STT_LANGUAGE", "pt"),
+    "provider": STT.provider,
+    "language": STT.language,
 }
 
-
-# =============================================================================
-# TTS (Text-to-Speech)
-# =============================================================================
-
 TTS_CONFIG = {
-    "provider": os.getenv("TTS_PROVIDER", "mock"),
-    "language": os.getenv("TTS_LANGUAGE", os.getenv("TTS_LANG", "pt")),
+    "provider": TTS.provider,
+    "language": TTS.language,
 }

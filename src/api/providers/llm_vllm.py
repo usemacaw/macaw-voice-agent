@@ -19,6 +19,7 @@ from typing import AsyncGenerator
 
 from config import LLM_CONFIG
 from providers.llm import LLMProvider, LLMStreamEvent, register_llm_provider
+from providers._openai_stream import parse_openai_tool_stream
 
 logger = logging.getLogger("open-voice-api.llm.vllm")
 
@@ -107,50 +108,15 @@ class VLLMProvider(LLMProvider):
             kwargs["tools"] = tools
 
         t0 = time.perf_counter()
-        first_token = False
-        active_tool_calls: dict[int, dict] = {}
 
         stream = await self._client.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if not delta:
-                continue
 
-            if not first_token:
-                first_token = True
-                self.last_ttft_ms = (time.perf_counter() - t0) * 1000
-                logger.info(f"LLM first event in {self.last_ttft_ms:.0f}ms")
+        def _on_first_token():
+            self.last_ttft_ms = (time.perf_counter() - t0) * 1000
+            logger.info(f"LLM first event in {self.last_ttft_ms:.0f}ms")
 
-            if delta.content:
-                yield LLMStreamEvent(type="text_delta", text=delta.content)
-
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in active_tool_calls:
-                        tc_id = tc.id or ""
-                        tc_name = tc.function.name if tc.function and tc.function.name else ""
-                        active_tool_calls[idx] = {"id": tc_id, "name": tc_name}
-                        yield LLMStreamEvent(
-                            type="tool_call_start",
-                            tool_call_id=tc_id,
-                            tool_name=tc_name,
-                        )
-                    if tc.function and tc.function.arguments:
-                        info = active_tool_calls[idx]
-                        yield LLMStreamEvent(
-                            type="tool_call_delta",
-                            tool_call_id=info["id"],
-                            tool_name=info["name"],
-                            tool_arguments_delta=tc.function.arguments,
-                        )
-
-        for info in active_tool_calls.values():
-            yield LLMStreamEvent(
-                type="tool_call_end",
-                tool_call_id=info["id"],
-                tool_name=info["name"],
-            )
+        async for event in parse_openai_tool_stream(stream, on_first_token=_on_first_token):
+            yield event
 
         self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
         logger.info(f"LLM stream (with tools) complete: {self.last_stream_total_ms:.0f}ms")
