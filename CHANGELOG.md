@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Cancellation fences in `EventEmitter`: events from stale `response_id` are silently dropped, preventing ghost audio/text during barge-in
+- Turn detection metrics: `vad_silence_wait_ms`, `smart_turn_inference_ms`, `smart_turn_waits` emitted in `macaw.metrics` per response
+- TTS first-class metrics: `tts_first_chunk_ms`, `tts_queue_max_depth`, `tts_calls` emitted in `macaw.metrics` per response
+- Per-provider admission control: `MAX_CONCURRENT_ASR`, `MAX_CONCURRENT_TTS`, `MAX_CONCURRENT_LLM` semaphores prevent resource exhaustion under load (`providers/admission.py`)
+- Progressive backpressure in `EventEmitter`: 4-level degradation (normal → throttle transcripts → drop transcripts → terminate) instead of binary drop/kill
+- Backpressure metrics: `backpressure_level` and `events_dropped` emitted in `macaw.metrics` per response
+- System metrics endpoint `/metrics`: CPU, memory, event loop lag, active sessions, cancel rate, admission control stats (`server/system_metrics.py`)
+- 11 cancellation race condition tests: validates fence mechanism, rapid barge-in, double cancel, cancel-then-new-response (`tests/test_cancellation_races.py`)
+- Token-budget windowing with pinning: replaces fixed 8-item window with `LLM_MAX_CONTEXT_TOKENS` budget, pins first user message, preserves tool call pairs (`pipeline/conversation.py`)
+- Latency SLO tracking: `slo_met`, `slo_target_ms` emitted in `macaw.metrics`; warns on breach. Configurable via `SLO_FIRST_AUDIO_MS` (1500ms) and `SLO_FIRST_AUDIO_TOOL_MS` (5000ms)
+- 9 token-budget windowing tests: validates budget limits, fallback cap, first-user pinning, tool pair cohesion (`tests/test_conversation_window.py`)
 - Server-side tool calling: `ToolRegistry` with async execution, timeout, and error handling (`tools/registry.py`)
 - Mock tool handlers for demo: `lookup_customer`, `get_account_balance`, `get_card_info`, `get_recent_transactions`, `create_support_ticket`, `transfer_to_human` (`tools/handlers.py`)
 - Filler TTS during tool execution: synthesizes phrases like "Vou consultar seu saldo." while tools run

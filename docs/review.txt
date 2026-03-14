@@ -1,0 +1,299 @@
+  Veredito: O que se aplica e o que não se aplica                                                                                                                                                           
+                                                                                                                                                                                                            
+  Pontos que se aplicam com precisão                                                                                                                                                                        
+                                                                                                                                                                                                            
+  1. Detecção de fim de turno como gargalo (Gargalo 1) — APLICA-SE                                                                                                                                          
+                                                                                                                                                                                                            
+  O documento acerta em cheio. Com VAD_SILENCE_MS=500 (default real em config.py:77) + Smart Turn com até 4 retentativas, o orçamento de latência pode facilmente consumir 400-800ms só na decisão de turno.
+   E não existem métricas explícitas para vad_offset_wait_ms ou smart_turn_wait_ms — o e2e_ms começa em speech_stopped_at, que já é depois dessa decisão. A latência de hesitação do detector está          
+  invisível.                                                                                                                                                                                                
+                                
+  2. TTS como gargalo de cauda (Gargalo 2) — APLICA-SE
+
+  Correto. O pipeline tem tts_synth_ms e tts_wait_ms, mas não separa tts_queue_wait_ms de tts_first_chunk_ms. Não há admission control no TTS — é chamado diretamente pelo _tts_worker() sem fila global
+  entre sessões. Sob concorrência, contenção de GPU é invisível.
+
+  3. Backpressure no WebSocket (Gargalo 5) — APLICA-SE PARCIALMENTE
+
+  O mecanismo de droppable vs structural está implementado e funcional (event_emitter.py). O documento acerta que falta degradação progressiva — hoje é binário: drop silencioso ou SlowClientError fatal.  
+  Não existe adaptive chunk rate, target buffer depth, ou suspensão seletiva de transcript deltas.
+                                                                                                                                                                                                            
+  4. Tool calling no caminho crítico (Gargalo 4) — APLICA-SE PARCIALMENTE                                                                                                                                   
+                                               
+  O documento acerta sobre o custo de latência, mas subestima o que já existe:                                                                                                                              
+  - Circuit breaker existe: se qualquer tool falha, all_tools_ok=False → força resposta texto na próxima chamada
+  - Timeout existe: 10s por tool (TOOL_TIMEOUT)                                                                                                                                                             
+  - Max rounds existe: 5 rounds (TOOL_MAX_ROUNDS)
+                                               
+  O que não existe é budget de latência por modo e política de "good enough answer" quando tool excede budget.
+
+  5. Ausência de admission control por provider (4.2) — APLICA-SE
+
+  Correto. Existe MAX_CONNECTIONS=10 no WebSocket, mas não há max_concurrent_tts, max_concurrent_asr, ou controle por estágio. Sessões em estados diferentes custam muito diferente.                        
+  
+  6. Windowing com tools pode perder contexto (6.2) — APLICA-SE PARCIALMENTE                                                                                                                                
+                                
+  O documento acerta o risco, mas o codebase já tem mitigação: conversation.py preserva pares function_call/function_call_output ao fazer windowing — puxa o call precedente se o output ficar órfão. Ainda 
+  assim, o risco de perder preferências/referências anafóricas em conversas longas com tools é real.
+                                                                                                                                                                                                            
+  7. Observabilidade falta métricas de operação (Seção 7) — APLICA-SE                                                                                                                                       
+                                               
+  Correto. As métricas de latência por turno são excelentes, mas faltam:                                                                                                                                    
+  - CPU/memória por processo    
+  - Event loop lag                                                                                                                                                                                          
+  - Queue depth por provider    
+  - GPU utilization nos microserviços                                                                                                                                                                       
+  - Cancel rate, barge-before-first-audio rate                                                                                                                                                              
+                                                                                                                                                                                                            
+  ---                                                                                                                                                                                                       
+  Pontos que NÃO se aplicam ou estão desatualizados                                                                                                                                                         
+                                                                                                                                                                                                            
+  8. Resampling 8kHz como problema de qualidade (Gargalo 3) — APLICA-SE TECNICAMENTE, MAS COM NUANCE                                                                                                        
+                                                                                                                                                                                                            
+  O documento sugere migrar para 16kHz interno. Isso é correto em tese, mas:                                                                                                                                
+  - O INTERNAL_SAMPLE_RATE=8000 existe por design (padrão telefonia, reduz bandwidth para gRPC)                                                                                                             
+  - Whisper no STT server faz seu próprio resampling internamente para 16kHz                                                                                                                                
+  - Kokoro TTS também produz em taxa nativa e resampla para 8kHz na saída   
+  - O custo real de CPU do resampling com scipy.signal.resample_poly é baixo (operação polyphase otimizada, ratio limpo 3:1)                                                                                
+                                                                                                                                                                                                            
+  A sugestão de medir resample_in_ms/resample_out_ms é válida, mas provavelmente não é o gargalo que o documento sugere para a escala atual.                                                                
+                                                                                                                                                                                                            
+  9. Base64/JSON como gargalo significativo (Gargalo 3) — EXAGERADO PARA A ESCALA ATUAL                                                                                                                     
+                                                                                                                                                                                                            
+  Com MAX_CONNECTIONS=10 e chunks de 1600 bytes (100ms @ 8kHz), o overhead é ~16 KB/s por sessão. 10 sessões = 160 KB/s de áudio base64. Isso não satura CPU nem rede. Em centenas de sessões, sim — mas o  
+  sistema tem hard cap em 10.                  
+                                                                                                                                                                                                            
+  10. "ContextBuilder, ToolEngine, ResponseStrategy separados" (Seção 1) — APLICA-SE, MAS SÃO ARQUIVOS NOVOS
+                                               
+  O documento menciona esses módulos como existentes. Eles existem (src/api/intelligence/), mas estão em ?? no git status — são código novo ainda não commitado. O documento parece ter sido escrito com
+  conhecimento desse código em progresso.
+
+  11. Fences de cancelamento por epoch/response_id (Seção 5.1, Recomendação 5) — APLICA-SE
+
+  Correto que não existem generation epochs explícitos. O sistema usa asyncio.Task.cancel() nativo. Funciona para a maioria dos casos, mas cenários de race (chunk TTS tardio após cancel, tool result      
+  órfão) podem produzir eventos fantasma. O response_id está nos eventos, mas não há gate server-side que rejeite emissão de eventos para response já cancelado.
+                                                                                                                                                                                                            
+  ---                           
+  Pontos que o documento erra ou exagera       
+
+  12. "Gateway saturando CPU antes da GPU" (4.1) — IMPROVÁVEL NA ESCALA ATUAL
+
+  Com 10 sessões max e asyncio single-threaded, o gateway não vai saturar CPU antes dos providers. O teste sugerido (fakes instantâneos) é útil para capacity planning futuro, mas não é um risco P1 hoje.  
+  
+  13. "Sentence splitter controla UX mais do que parece" (6.1) — PARCIALMENTE EXAGERADO                                                                                                                     
+                                
+  O codebase tem uma implementação sofisticada: threshold de 20 chars para primeira frase com break em clause boundaries (,;:—), e MAX_SENTENCE_CHARS=150 com recursive splitting. Não é uma heurística     
+  ingênua. O risco de "primeira fala pouco informativa" existe mas é mitigado pelo design.
+                                                                                                                                                                                                            
+  14. Nota 8.8/10 como design de sistema — JUSTO, TALVEZ GENEROSO                                                                                                                                           
+                                               
+  O design é bom, mas os módulos em intelligence/ e turns/ ainda não estão integrados (untracked files). Se considerarmos só o código commitado, o score deveria ser ligeiramente menor.                    
+                                
+  ---                                                                                                                                                                                                       
+  Resumo executivo              
+                                                                                                                                                                                                            
+  ┌───────────────────────┬────────┬────────────────────────────────────┐
+  │       Categoria       │ Pontos │             Aplicam-se             │                                                                                                                                   
+  ├───────────────────────┼────────┼────────────────────────────────────┤
+  │ Gargalos de latência  │ 5      │ 4 de 5 (resampling exagerado)      │                                                                                                                                   
+  ├───────────────────────┼────────┼────────────────────────────────────┤
+  │ Escalabilidade        │ 3      │ 2 de 3 (gateway não é risco atual) │                                                                                                                                   
+  ├───────────────────────┼────────┼────────────────────────────────────┤
+  │ Correção/concorrência │ 2      │ 2 de 2                             │                                                                                                                                   
+  ├───────────────────────┼────────┼────────────────────────────────────┤
+  │ Observabilidade       │ 1      │ 1 de 1                             │
+  ├───────────────────────┼────────┼────────────────────────────────────┤
+  │ Recomendações         │ 6      │ 5 de 6 relevantes                  │
+  └───────────────────────┴────────┴────────────────────────────────────┘
+
+  O documento é de alta qualidade e ~80% se aplica diretamente ao estado atual. Os 20% restantes são projeções para escala que ainda não existe (centenas de sessões) ou superestimam riscos que o design
+  atual já mitiga parcialmente.
+
+  Top 3 ações mais valiosas do documento, validadas contra o código:
+
+  1. Instrumentar fim de turno — gap real e invisível na observabilidade
+  2. Implementar fences de cancelamento por response_id — risco real de eventos fantasma
+  3. Admission control por provider — necessário antes de escalar além de 10 sessões
+
+✻ Cogitated for 3m 18s
+
+❯ Crie um plano roadmap executavel para os itens que se aplica.                                                                                                                                             
+                                                                
+● Plan(Plan roadmap for validated items)                                                                                                                                                                    
+  ⎿  Done (28 tool uses · 100.4k tokens · 3m 44s)                                                     
+  (ctrl+o to expand)                                                                                  
+                                                                                                                                                                                                            
+● Roadmap Executável — Hardening do macaw-voice-agent                      
+                                                                                                                                                                                                            
+  Grafo de Dependências                                                                                                                                                                                     
+                                                                                                                                                                                                            
+  Phase 1 (Fundação)          Phase 2 (Proteção)         Phase 3 (Qualidade)                                                                                                                                
+  ─────────────────           ──────────────────         ───────────────────                                                                                                                                
+  [2] Cancel Fences ────────→ [9] Testes de Race                                                                                                                                                            
+  [1] Turn Metrics  ─┐                                   [7] Windowing Híbrido                                                                                                                              
+  [4] TTS Metrics   ─┴─────→ [6] Métricas Operac.  ───→ [8] Budget de Latência                                                                                                                              
+                              [3] Admission Control                                                                                                                                                         
+                              [5] Backpressure Progr.                                                                                                                                                       
+                                                                                                                                                                                                            
+  ---                                                                                                                                                                                                       
+  Phase 1 — Fundação (3 dias)                                                                                                                                                                               
+                                                                                                                                                                                                            
+  Item 2: Fences de Cancelamento por response_id
+                                                                                                                                                                                                            
+  Esforço: S | Risco se não fizer: Audio fantasma durante barge-in                                                                                                                                          
+                                                                                                                                                                                                            
+  O quê: Adicionar gate no EventEmitter que rejeita eventos de response cancelado.                                                                                                                          
+                                               
+  Onde:                                                                                                                                                                                                     
+  - src/api/protocol/event_emitter.py — Adicionar _active_response_id, gate em emit() (~15 linhas)
+  - src/api/server/session.py — Chamar set_active_response() / invalidate_response() em _start_response e _cancel_active_response                                                                           
+                                                                                                                                 
+  Lógica: Se o evento tem response_id e não bate com _active_response_id, drop silencioso + debug log. Eventos sem response_id (session.created, conversation.item.created) passam incondicionalmente.      
+                                                                                                                                                                                                            
+  ---                                                                                                                                                                                                       
+  Item 1: Instrumentar Fim de Turno                                                                                                                                                                         
+                                                                                                                                                                                                            
+  Esforço: S | Risco se não fizer: Latência de turn detection invisível
+                                                                                                                                                                                                            
+  O quê: Expor vad_silence_wait_ms, smart_turn_inference_ms, smart_turn_waits no macaw.metrics.                                                                                                             
+                                                                                                                                                                                                            
+  Onde:                                                                                                                                                                                                     
+  - src/api/audio/vad.py — Adicionar _silence_start_time (set quando _silence_chunks vai de 0→1), acumular Smart Turn ms (já calculado mas só logado), expor last_turn_metrics: dict
+  - src/api/server/audio_input.py:~223 — Ler self._vad.last_turn_metrics e mergear em self._response_metrics                                                                                                
+                                                                                                            
+  Fluxo automático: response_runner.py já copia prior_metrics para macaw.metrics. Novas chaves fluem sem mudança.                                                                                           
+                                                                                                                                                                                                            
+  ---                                                                                                                                                                                                       
+  Item 4: TTS com Métricas de Primeira Classe                                                                                                                                                               
+                                                                                                                                                                                                            
+  Esforço: S | Risco se não fizer: Não distingue "TTS lento" de "fila cheia"
+                                                                                                                                                                                                            
+  O quê: Adicionar tts_first_chunk_ms, tts_queue_max_depth, tts_calls ao pipeline.                                                                                                                          
+                                                                                                                                                                                                            
+  Onde:                                                                                                                                                                                                     
+  - src/api/pipeline/sentence_pipeline.py — Enriquecer PipelineMetrics, instrumentar _tts_worker com high watermark de sentence_queue.qsize() e timing do primeiro chunk
+  - src/api/providers/tts_remote.py — Registrar last_first_chunk_ms em synthesize_stream                                                                                                                    
+  - src/api/server/response_runner.py:~724 — Mapear novas chaves do pipeline.metrics
+                                                                                                                                                                                                            
+  ---                           
+  Phase 2 — Proteção (4-5 dias)                
+
+  Item 9: Testes de Robustez de Cancelamento
+
+  Esforço: M | Depende de: Item 2
+
+  O quê: 6 cenários sistemáticos de race condition:
+
+  ┌──────────────────────────────────────────┬────────────────────────────────────────────┐
+  │                 Cenário                  │                  Verifica                  │
+  ├──────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ Cancel durante LLM streaming + áudio     │ Sem audio events após cancel               │
+  ├──────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ Cancel durante TTS synthesis (SlowTTS)   │ Pipeline limpa, sem tasks vazadas          │                                                                                                                 
+  ├──────────────────────────────────────────┼────────────────────────────────────────────┤                                                                                                                 
+  │ Cancel durante tool execution (SlowTool) │ Resultado da tool não emitido              │                                                                                                                 
+  ├──────────────────────────────────────────┼────────────────────────────────────────────┤                                                                                                                 
+  │ Barge-in → nova fala imediata            │ Só uma response ativa                      │
+  ├──────────────────────────────────────────┼────────────────────────────────────────────┤                                                                                                                 
+  │ Double cancel rápido                     │ Sem exception, sem response.done duplicado │
+  ├──────────────────────────────────────────┼────────────────────────────────────────────┤                                                                                                                 
+  │ Cancel antes do primeiro áudio           │ Lifecycle limpo, sem estado parcial        │
+  └──────────────────────────────────────────┴────────────────────────────────────────────┘                                                                                                                 
+                                
+  Onde: Criar src/api/tests/test_cancellation_races.py (~250 linhas). Adicionar fakes SlowTTS e ToolCallingLLM em conftest.py.                                                                              
+  
+  ---                                                                                                                                                                                                       
+  Item 3: Admission Control por Provider
+                                               
+  Esforço: M | Risco se não fizer: Contenção de GPU derruba todas as sessões
+                                                                                                                                                                                                            
+  O quê: Semáforos por recurso: MAX_CONCURRENT_ASR=5, MAX_CONCURRENT_TTS=5, MAX_CONCURRENT_LLM=3.                                                                                                           
+                                                                                                                                                                                                            
+  Onde:                                                                                                                                                                                                     
+  - Criar src/api/providers/admission.py — ProviderSemaphore com context manager, métricas de queue depth e wait time (~40 linhas)
+  - src/api/config.py — 3 env vars                                                                                                                                                                          
+  - src/api/pipeline/sentence_pipeline.py — Acquire TTS semaphore em _tts_worker
+  - src/api/server/response_runner.py — Acquire LLM semaphore antes de generate_stream                                                                                                                      
+  - src/api/server/audio_input.py — Acquire ASR semaphore antes de transcribe
+                                               
+  ---
+  Item 5: Degradação Progressiva de Backpressure
+
+  Esforço: M | Risco se não fizer: Sessions mobile morrem abruptamente
+
+  O quê: 4 níveis em vez de binário:
+
+  ┌────────────┬───────────────────────┬─────────────────────────────────────────────────┐
+  │   Level    │        Trigger        │                      Ação                       │
+  ├────────────┼───────────────────────┼─────────────────────────────────────────────────┤
+  │ 0 Normal   │ —                     │ Envia tudo                                      │
+  ├────────────┼───────────────────────┼─────────────────────────────────────────────────┤
+  │ 1 Light    │ 3+ drops consecutivos │ Throttle audio_transcript.delta (1 a cada 3)    │
+  ├────────────┼───────────────────────┼─────────────────────────────────────────────────┤
+  │ 2 Heavy    │ 10+ drops             │ Para audio_transcript.delta, batch audio deltas │
+  ├────────────┼───────────────────────┼─────────────────────────────────────────────────┤
+  │ 3 Critical │ 20+ drops             │ SlowClientError (comportamento atual)           │
+  └────────────┴───────────────────────┴─────────────────────────────────────────────────┘
+
+  Onde:
+  - src/api/protocol/event_emitter.py — Adicionar _consecutive_drops, lógica de level, log de transições (~30 linhas)
+  - src/api/server/response_runner.py — Emitir backpressure_level e events_dropped no macaw.metrics                                                                                                         
+  
+  ---                                                                                                                                                                                                       
+  Item 6: Métricas Operacionais 
+                                                                                                                                                                                                            
+  Esforço: M | Risco se não fizer: Sem visibilidade de saúde do servidor
+                                                                                                                                                                                                            
+  O quê: CPU, memória, event loop lag, cancel rate, barge-before-first-audio.                                                                                                                               
+                                                                                                                                                                                                            
+  Onde:                                                                                                                                                                                                     
+  - Criar src/api/server/system_metrics.py — Singleton com sampling a cada 5s via psutil (~50 linhas)
+  - src/api/server/ws_server.py — Endpoint /metrics JSON (ao lado do /health)                                                                                                                               
+  - src/api/server/session.py — Contadores _cancel_count, _barge_before_first_audio
+  - src/api/server/response_runner.py — Incluir novos contadores no macaw.metrics                                                                                                                           
+                                                                                                                                                                                                            
+  ---                                                                                                                                                                                                       
+  Phase 3 — Qualidade (3-4 dias)                                                                                                                                                                            
+                                                                                                                                                                                                            
+  Item 7: Windowing Híbrido                    
+                                                                                                                                                                                                            
+  Esforço: M | Risco se não fizer: LLM "esquece" contexto em conversas longas com tools                                                                                                                     
+                                                                                                                                                                                                            
+  O quê: Substituir window fixo de 8 items por budget de tokens + pinning.                                                                                                                                  
+                                               
+  Onde:                                        
+  - src/api/intelligence/context_builder.py — Adicionar _estimate_tokens() (heurística len(text)//4), build_messages_with_budget(), parâmetro pinned_indices (~60 linhas)
+  - src/api/pipeline/conversation.py — Suporte a pinned_indices em items_to_windowed_messages (~15 linhas)
+  - src/api/config.py — LLM_MAX_CONTEXT_TOKENS=4000
+
+  Lógica: Caminhar items do mais novo ao mais velho acumulando tokens. Parar no budget. Sempre incluir pinned (primeiro user message, tool results). Manter coesão de pares tool call/output.
+
+  ---
+  Item 8: Budget de Latência por Modo
+
+  Esforço: S (fase 1 medição) → L (fase 2 enforcement)
+
+  O quê:
+  - Fase 1: Adicionar slo_met: bool e slo_target_ms: float ao macaw.metrics. Warn log quando SLO é excedido.
+  - Fase 2: Política de "good enough answer" quando tool excede budget.
+
+  Onde:
+  - src/api/intelligence/response_strategy.py — Adicionar max_first_audio_ms ao ResponsePlan (1500ms sem tool, 5000ms com tool)
+  - src/api/config.py — SLO_FIRST_AUDIO_MS, SLO_FIRST_AUDIO_TOOL_MS
+  - src/api/server/response_runner.py — Tracking de elapsed time, warn log, emissão no metrics
+
+  ---
+  Resumo de Esforço
+
+  ┌───────┬────────────┬─────────────┬────────────────┬──────────────────────┐
+  │ Phase │   Items    │    Dias     │ Arquivos novos │ Arquivos modificados │
+  ├───────┼────────────┼─────────────┼────────────────┼──────────────────────┤
+  │ 1     │ 2, 1, 4    │ ~3          │ 0              │ 6                    │
+  ├───────┼────────────┼─────────────┼────────────────┼──────────────────────┤
+  │ 2     │ 9, 3, 5, 6 │ ~4-5        │ 3              │ 8                    │
+  ├───────┼────────────┼─────────────┼────────────────┼──────────────────────┤
+  │ 3     │ 7, 8       │ ~3-4        │ 0              │ 5                    │
+  ├───────┼────────────┼─────────────┼────────────────┼──────────────────────┤
+  │ Total │ 9 items    │ ~10-12 dias │ 3              │ ~12 únicos           │
+  └───────┴────────────┴─────────────┴────────────────┴──────────────────────┘
+

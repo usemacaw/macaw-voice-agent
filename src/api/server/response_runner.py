@@ -1,9 +1,10 @@
 """
-Response execution engine: LLM -> tools -> TTS -> audio events.
+ResponseOrchestrator (ResponseRunner) — delegates response execution to strategies.
 
-Extracted from RealtimeSession to isolate the response pipeline
-from session lifecycle management. Each response creates a fresh
-ResponseRunner instance.
+Orchestrates the response cycle: selects strategy, builds context,
+delegates tool execution and audio synthesis to specialized modules.
+
+Kept as ResponseRunner for backward compatibility with existing imports.
 """
 
 from __future__ import annotations
@@ -19,13 +20,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from audio.codec import encode_audio_for_client
-from config import LLM
-from pipeline.conversation import items_to_messages, items_to_windowed_messages
+from intelligence.context_builder import ContextBuilder
+from intelligence.response_strategy import ResponseMode, select_strategy
+from intelligence.tool_engine import ToolExecutionEngine
 from pipeline.sentence_pipeline import SentencePipeline
 from protocol import events
 from protocol.event_emitter import SlowClientError
 from protocol.models import ContentPart, ConversationItem
-from server.filler import build_dynamic_filler, send_filler_audio
+from providers.admission import ADMISSION
 
 if TYPE_CHECKING:
     from protocol.event_emitter import EventEmitter
@@ -85,14 +87,16 @@ class ResponseContext:
 
 
 # ---------------------------------------------------------------------------
-# ResponseRunner
+# ResponseRunner (orchestrator)
 # ---------------------------------------------------------------------------
 
 
 class ResponseRunner:
-    """Executes a complete response: LLM -> (tools ->)* TTS -> audio events.
+    """Orchestrates a complete response: selects strategy, delegates execution.
 
     Created per-response. Holds no state between responses.
+    Uses ContextBuilder for LLM context, ToolExecutionEngine for tools,
+    and ResponsePlan for strategy selection.
     """
 
     def __init__(
@@ -110,12 +114,14 @@ class ResponseRunner:
         self._tts = tts
         self._config = config
         self._tool_registry = tool_registry
+        self._context_builder = ContextBuilder(config)
 
         # Populated during run(), read by caller after completion
         self.metrics: dict[str, object] = {}
 
         # Set by caller, used for E2E latency measurement
         self._speech_stopped_at: float | None = None
+        self._slo_target_ms: float = 0.0
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -127,24 +133,18 @@ class ResponseRunner:
         ctx: ResponseContext,
         prior_metrics: dict[str, object],
     ) -> None:
-        """Execute a full response cycle.
-
-        Args:
-            response_id: Unique response identifier.
-            ctx: Shared session state (items, lock, callbacks).
-            prior_metrics: Metrics from the speech/ASR phase to carry over.
-        """
+        """Execute a full response cycle."""
         self._ctx = ctx
         self._speech_stopped_at = ctx.speech_stopped_at
+
+        # Select strategy based on config and tools
+        plan = select_strategy(self._config, self._tool_registry)
+        self._slo_target_ms = plan.max_first_audio_ms
 
         item_id = f"item_{uuid.uuid4().hex[:24]}"
         output_index = 0
         content_index = 0
         response_start = time.perf_counter()
-        has_audio = "audio" in self._config.modalities
-        has_tools = bool(self._config.tools) or (
-            self._tool_registry is not None and self._tool_registry.has_server_tools
-        )
         assistant_item = None
 
         # Initialize per-response metrics
@@ -156,41 +156,38 @@ class ResponseRunner:
             "tools_used": [],
             "tool_rounds": 0,
         }
-        # Carry over metrics from speech/ASR phase
-        for key in ("asr_ms", "speech_ms", "asr_mode", "input_chars", "speech_rms"):
+        for key in (
+            "asr_ms", "speech_ms", "asr_mode", "input_chars", "speech_rms",
+            "vad_silence_wait_ms", "smart_turn_inference_ms", "smart_turn_waits",
+        ):
             if key in prior_metrics:
                 self.metrics[key] = prior_metrics[key]
 
         logger.info(
             f"[{self._sid[:8]}] RESPONSE START: "
-            f"items={len(ctx.items)}, has_audio={has_audio}, has_tools={has_tools}"
+            f"items={len(ctx.items)}, mode={plan.mode.name}"
         )
 
         try:
-            # Build messages from conversation history (windowed to reduce context)
+            # Build context via ContextBuilder
             async with ctx.state_lock:
-                if has_tools:
-                    messages = items_to_windowed_messages(list(ctx.items), window=8)
-                else:
-                    messages = items_to_messages(list(ctx.items))
-            system = self._config.instructions
-            temperature = self._config.temperature
-            max_tokens = (
-                self._config.max_response_output_tokens
-                if isinstance(self._config.max_response_output_tokens, int)
-                else LLM.max_tokens
-            )
+                messages, system, temperature, max_tokens = (
+                    self._context_builder.build_for_response(
+                        ctx.items, has_tools=plan.has_tools
+                    )
+                )
 
-            if has_tools:
+            if plan.has_tools:
                 await self._run_with_tools(
-                    response_id, messages, system, temperature, max_tokens, has_audio,
+                    response_id, messages, system, temperature, max_tokens,
+                    plan,
                 )
             else:
                 assistant_item = await self._setup_response(
-                    response_id, item_id, output_index, content_index, has_audio
+                    response_id, item_id, output_index, content_index, plan.has_audio
                 )
 
-                if has_audio:
+                if plan.has_audio:
                     full_transcript = await self._run_audio_response(
                         response_id, item_id, output_index, content_index,
                         assistant_item, messages, system, temperature, max_tokens,
@@ -229,7 +226,7 @@ class ResponseRunner:
             )
 
     # ------------------------------------------------------------------
-    # Tool calling loop
+    # Tool calling loop (delegates to ToolExecutionEngine)
     # ------------------------------------------------------------------
 
     async def _run_with_tools(
@@ -239,48 +236,36 @@ class ResponseRunner:
         system: str,
         temperature: float,
         max_tokens: int,
-        has_audio: bool,
+        plan,
     ) -> None:
         """Run response with function calling support."""
-        from providers.llm import LLMStreamEvent  # noqa: F811
-
-        server_side = (
-            self._tool_registry is not None
-            and self._tool_registry.has_server_tools
-        )
-
         await self._emitter.emit(events.response_created("", response_id))
 
         response_start = time.perf_counter()
         output_index = 0
-        max_rounds = (
-            self._tool_registry.max_rounds if self._tool_registry else 5
-        )
 
-        # Merge tool schemas: session config tools + server-side tool schemas
-        tools = list(self._config.tools) if self._config.tools else []
-        if server_side:
-            server_schemas = self._tool_registry.get_schemas()
-            existing_names = {
-                t.get("function", {}).get("name") for t in tools if isinstance(t, dict)
-            }
-            for schema in server_schemas:
-                name = schema.get("function", {}).get("name", "")
-                if name not in existing_names:
-                    tools.append(schema)
+        # Create tool engine if server-side tools
+        tool_engine = None
+        if plan.server_side_tools and self._tool_registry:
+            tool_engine = ToolExecutionEngine(
+                session_id=self._sid,
+                emitter=self._emitter,
+                tts=self._tts,
+                config=self._config,
+                tool_registry=self._tool_registry,
+            )
 
         tools_used = 0
         tool_round = 0
-        for tool_round in range(max_rounds + 1):
-            allow_tools = tools if tools_used < max_rounds else None
+        for tool_round in range(plan.max_rounds + 1):
+            allow_tools = plan.tools if tools_used < plan.max_rounds else None
             round_max_tokens = max_tokens if allow_tools else min(max_tokens, 40)
 
             # Final round (no tools) + audio: use pipelined LLM->TTS
-            if not allow_tools and has_audio:
+            if not allow_tools and plan.has_audio:
                 logger.info(
                     f"[{self._sid[:8]}] LLM call round {tool_round}: "
-                    f"msgs={len(messages)}, tools=no (pipelined), "
-                    f"messages={[m.get('role', '?') + ':' + str(m.get('content') or '')[:40] for m in messages[-4:]]}"
+                    f"msgs={len(messages)}, tools=no (pipelined)"
                 )
                 await self._emit_tool_response_audio_streamed(
                     response_id, output_index, response_start,
@@ -290,41 +275,40 @@ class ResponseRunner:
 
             logger.info(
                 f"[{self._sid[:8]}] LLM call round {tool_round}: "
-                f"msgs={len(messages)}, tools={'yes' if allow_tools else 'no'}, "
-                f"messages={[m.get('role', '?') + ':' + str(m.get('content') or '')[:40] for m in messages[-4:]]}"
+                f"msgs={len(messages)}, tools={'yes' if allow_tools else 'no'}"
             )
 
             # Collect full LLM stream: text + tool calls
             collected_text = ""
             collected_tool_calls: list[dict] = []
-
             current_tool_call_id = ""
             current_tool_name = ""
             tool_arguments_buffer = ""
             in_tool_call = False
 
-            async for event in self._llm.generate_stream_with_tools(
-                messages, system=system,
-                tools=allow_tools or None,
-                temperature=temperature,
-                max_tokens=round_max_tokens,
-            ):
-                if event.type == "text_delta":
-                    collected_text += event.text
-                elif event.type == "tool_call_start":
-                    current_tool_call_id = event.tool_call_id
-                    current_tool_name = event.tool_name
-                    tool_arguments_buffer = ""
-                    in_tool_call = True
-                elif event.type == "tool_call_delta" and in_tool_call:
-                    tool_arguments_buffer += event.tool_arguments_delta
-                elif event.type == "tool_call_end" and in_tool_call:
-                    collected_tool_calls.append({
-                        "id": current_tool_call_id,
-                        "name": current_tool_name,
-                        "arguments": tool_arguments_buffer,
-                    })
-                    in_tool_call = False
+            async with ADMISSION.llm.acquire():
+                async for event in self._llm.generate_stream_with_tools(
+                    messages, system=system,
+                    tools=allow_tools or None,
+                    temperature=temperature,
+                    max_tokens=round_max_tokens,
+                ):
+                    if event.type == "text_delta":
+                        collected_text += event.text
+                    elif event.type == "tool_call_start":
+                        current_tool_call_id = event.tool_call_id
+                        current_tool_name = event.tool_name
+                        tool_arguments_buffer = ""
+                        in_tool_call = True
+                    elif event.type == "tool_call_delta" and in_tool_call:
+                        tool_arguments_buffer += event.tool_arguments_delta
+                    elif event.type == "tool_call_end" and in_tool_call:
+                        collected_tool_calls.append({
+                            "id": current_tool_call_id,
+                            "name": current_tool_name,
+                            "arguments": tool_arguments_buffer,
+                        })
+                        in_tool_call = False
 
             # Capture LLM timing
             if tool_round == 0:
@@ -339,7 +323,7 @@ class ResponseRunner:
                         f"[{self._sid[:8]}] LLM text (round {tool_round}): "
                         f"{collected_text[:200]!r}"
                     )
-                    if has_audio:
+                    if plan.has_audio:
                         await self._emit_tool_response_audio(
                             response_id, output_index, response_start,
                             collected_text,
@@ -362,34 +346,43 @@ class ResponseRunner:
                 f"{[tc['name'] for tc in collected_tool_calls]}"
             )
 
-            if server_side:
+            if plan.server_side_tools and tool_engine:
                 for tc in collected_tool_calls:
                     self.metrics.setdefault("tools_used", []).append(tc["name"])
 
-                all_ok = await self._execute_tools_server_side(
-                    response_id, output_index, collected_tool_calls, has_audio,
+                result = await tool_engine.execute_server_side(
+                    response_id, output_index, collected_tool_calls,
+                    plan.has_audio, self._ctx.state_lock, self._ctx.append_item,
                 )
-                output_index += len(collected_tool_calls)
+                output_index += result.output_index_delta
                 tools_used += 1
 
-                # Rebuild messages with tool results
+                # Rebuild messages with tool results via ContextBuilder
                 async with self._ctx.state_lock:
-                    messages = items_to_windowed_messages(list(self._ctx.items), window=8)
+                    messages = self._context_builder.rebuild_after_tool_round(
+                        self._ctx.items
+                    )
 
-                if not all_ok:
+                if not result.all_tools_ok:
                     logger.info(
                         f"[{self._sid[:8]}] Tool error detected, "
                         "forcing text response on next call"
                     )
-                    tools_used = max_rounds
+                    tools_used = plan.max_rounds
             else:
-                await self._emit_tool_calls_for_client(
-                    response_id, output_index, collected_tool_calls,
-                )
+                if tool_engine:
+                    await tool_engine.emit_tool_calls_for_client(
+                        response_id, output_index, collected_tool_calls,
+                        self._ctx.state_lock, self._ctx.append_item,
+                    )
+                else:
+                    await self._emit_tool_calls_for_client_legacy(
+                        response_id, output_index, collected_tool_calls,
+                    )
                 break
         else:
             logger.warning(
-                f"[{self._sid[:8]}] Tool execution exceeded max rounds ({max_rounds})"
+                f"[{self._sid[:8]}] Tool execution exceeded max rounds ({plan.max_rounds})"
             )
 
         response_ms = (time.perf_counter() - response_start) * 1000
@@ -403,112 +396,13 @@ class ResponseRunner:
 
         self.metrics["total_ms"] = round(response_ms, 1)
         self.metrics["tool_rounds"] = tool_round + 1
+        self.metrics["backpressure_level"] = self._emitter.pressure_level
+        self.metrics["events_dropped"] = self._emitter.total_drops
+        if tool_engine:
+            self.metrics["tool_timings"] = tool_engine.tool_timings
         await self._emitter.emit(
             events.macaw_metrics(response_id, self.metrics)
         )
-
-    # ------------------------------------------------------------------
-    # Server-side tool execution
-    # ------------------------------------------------------------------
-
-    async def _execute_tools_server_side(
-        self,
-        response_id: str,
-        output_index: int,
-        tool_calls: list[dict],
-        has_audio: bool,
-    ) -> bool:
-        """Execute tool calls server-side with filler TTS.
-
-        Returns True if all tools succeeded, False if any returned an error.
-        """
-        any_error = False
-        # Send filler audio for the first tool call
-        if has_audio and tool_calls:
-            first_tool = tool_calls[0]
-            filler = build_dynamic_filler(first_tool["name"], first_tool["arguments"])
-            await send_filler_audio(
-                self._sid, self._tts, self._emitter, self._config,
-                response_id, output_index, filler,
-            )
-
-        for tc in tool_calls:
-            tc_id = tc["id"] or f"call_{uuid.uuid4().hex[:12]}"
-            tc_name = tc["name"]
-            tc_args = tc["arguments"]
-
-            # Create function_call item
-            fc_item_id = f"item_{uuid.uuid4().hex[:24]}"
-            fc_item = ConversationItem(
-                id=fc_item_id,
-                type="function_call",
-                status="completed",
-                call_id=tc_id,
-                name=tc_name,
-                arguments=tc_args,
-            )
-            await self._emitter.emit(
-                events.response_output_item_added(
-                    "", response_id, output_index, fc_item
-                )
-            )
-            async with self._ctx.state_lock:
-                self._ctx.append_item(fc_item)
-
-            await self._emitter.emit(
-                events.response_function_call_arguments_done(
-                    "", response_id, fc_item_id, output_index, tc_id, tc_args,
-                )
-            )
-            await self._emitter.emit(
-                events.response_output_item_done(
-                    "", response_id, output_index, fc_item
-                )
-            )
-
-            # Execute tool with timing
-            tool_t0 = time.perf_counter()
-            result_json = await self._tool_registry.execute(tc_name, tc_args)
-            tool_exec_ms = (time.perf_counter() - tool_t0) * 1000
-            logger.info(
-                f"[{self._sid[:8]}] Tool '{tc_name}' result ({tool_exec_ms:.0f}ms): "
-                f"{result_json[:200]}"
-            )
-
-            # Store per-tool timing
-            tool_timings = self.metrics.setdefault("tool_timings", [])
-            tool_ok = True
-            try:
-                result_data = json.loads(result_json)
-                if isinstance(result_data, dict) and "error" in result_data:
-                    any_error = True
-                    tool_ok = False
-            except (json.JSONDecodeError, TypeError):
-                pass
-            tool_timings.append({
-                "name": tc_name,
-                "exec_ms": round(tool_exec_ms, 1),
-                "ok": tool_ok,
-            })
-
-            # Create function_call_output item
-            fco_item_id = f"item_{uuid.uuid4().hex[:24]}"
-            fco_item = ConversationItem(
-                id=fco_item_id,
-                type="function_call_output",
-                status="completed",
-                call_id=tc_id,
-                output=result_json,
-            )
-            async with self._ctx.state_lock:
-                self._ctx.append_item(fco_item)
-            await self._emitter.emit(
-                events.conversation_item_created("", fc_item_id, fco_item)
-            )
-
-            output_index += 1
-
-        return not any_error
 
     # ------------------------------------------------------------------
     # Response emission helpers
@@ -694,13 +588,13 @@ class ResponseRunner:
             )
         )
 
-    async def _emit_tool_calls_for_client(
+    async def _emit_tool_calls_for_client_legacy(
         self,
         response_id: str,
         output_index: int,
         tool_calls: list[dict],
     ) -> None:
-        """Emit tool call events for client-side execution."""
+        """Emit tool call events for client-side execution (no ToolEngine)."""
         for tc in tool_calls:
             tc_id = tc["id"] or f"call_{uuid.uuid4().hex[:12]}"
             fc_item_id = f"item_{uuid.uuid4().hex[:24]}"
@@ -844,6 +738,9 @@ class ResponseRunner:
             "pipeline_total_ms": round(pm.total_latency_ms, 1),
             "tts_synth_ms": round(pm.tts_synth_ms, 1),
             "tts_wait_ms": round(pm.tts_wait_ms, 1),
+            "tts_first_chunk_ms": round(pm.tts_first_chunk_ms, 1),
+            "tts_queue_max_depth": pm.tts_queue_max_depth,
+            "tts_calls": pm.tts_calls,
             "sentences": pm.sentences_generated,
             "audio_chunks": pm.audio_chunks_produced,
             "output_chars": len(full_transcript),
@@ -948,6 +845,8 @@ class ResponseRunner:
             self.metrics["output_chars"] = len(full_transcript or full_text)
 
         self.metrics["total_ms"] = round(response_ms, 1)
+        self.metrics["backpressure_level"] = self._emitter.pressure_level
+        self.metrics["events_dropped"] = self._emitter.total_drops
         await self._emitter.emit(
             events.macaw_metrics(response_id, self.metrics)
         )
@@ -957,13 +856,24 @@ class ResponseRunner:
     # ------------------------------------------------------------------
 
     def _record_e2e_latency(self) -> None:
-        """Record E2E latency on first audio chunk sent."""
+        """Record E2E latency on first audio chunk sent. Check SLO compliance."""
         if self._speech_stopped_at is not None:
             e2e_ms = (time.perf_counter() - self._speech_stopped_at) * 1000
             self.metrics["e2e_ms"] = round(e2e_ms, 1)
+
+            # SLO compliance
+            if self._slo_target_ms > 0:
+                slo_met = e2e_ms <= self._slo_target_ms
+                self.metrics["slo_target_ms"] = self._slo_target_ms
+                self.metrics["slo_met"] = slo_met
+                if not slo_met:
+                    logger.warning(
+                        f"[{self._sid[:8]}] SLO BREACH: e2e={e2e_ms:.0f}ms > "
+                        f"target={self._slo_target_ms:.0f}ms"
+                    )
+
             logger.info(
                 f"[{self._sid[:8]}] E2E LATENCY: {e2e_ms:.0f}ms "
                 f"(speech_stopped -> first_audio_sent)"
             )
-            # Only record once
             self._speech_stopped_at = None

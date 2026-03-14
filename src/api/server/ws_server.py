@@ -21,6 +21,7 @@ from websockets.asyncio.server import ServerConnection
 
 from config import WS_CONFIG
 from server.session import RealtimeSession
+from server.system_metrics import SYSTEM_METRICS
 
 if TYPE_CHECKING:
     from providers.asr import ASRProvider
@@ -127,6 +128,15 @@ class WebSocketServer:
                     "max_connections": WS_CONFIG["max_connections"],
                     "providers": provider_health,
                 }) + "\n",
+            )
+
+        # Operational metrics endpoint
+        if parsed.path == "/metrics":
+            SYSTEM_METRICS.active_sessions = len(self._active_sessions)
+            await SYSTEM_METRICS.sample_event_loop_lag()
+            return connection.respond(
+                200,
+                json.dumps(SYSTEM_METRICS.snapshot()) + "\n",
             )
 
         # Check path

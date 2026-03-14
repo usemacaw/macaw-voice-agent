@@ -86,6 +86,11 @@ class VADProcessor:
         self._smart_turn_wait_count = 0
         # Max times Smart Turn can say "incomplete" before we force the turn
         self._smart_turn_max_waits = 4
+
+        # Turn detection metrics (populated per speech_stopped, read by AudioInputHandler)
+        self._silence_start_time: float | None = None
+        self._smart_turn_accum_ms: float = 0.0
+        self.last_turn_metrics: dict[str, object] = {}
         try:
             from audio.smart_turn import SmartTurnDetector
             self._smart_turn = SmartTurnDetector()
@@ -156,8 +161,13 @@ class VADProcessor:
             if is_speech:
                 self._silence_chunks = 0
                 self._smart_turn_wait_count = 0
+                self._silence_start_time = None
+                self._smart_turn_accum_ms = 0.0
             else:
                 self._silence_chunks += 1
+                # Mark when silence begins (first non-speech chunk)
+                if self._silence_start_time is None:
+                    self._silence_start_time = time.perf_counter()
 
                 if self._silence_chunks >= self._silence_threshold_chunks:
                     speech_duration_ms = self._total_audio_ms - self._speech_start_ms
@@ -169,6 +179,7 @@ class VADProcessor:
                                 bytes(self._speech_audio), source_sample_rate=SAMPLE_RATE
                             )
                             st_ms = (time.perf_counter() - t0) * 1000
+                            self._smart_turn_accum_ms += st_ms
                             logger.info(
                                 f"Smart Turn: complete={is_complete}, prob={prob:.2f}, "
                                 f"inference={st_ms:.0f}ms, wait_count={self._smart_turn_wait_count}"
@@ -178,7 +189,18 @@ class VADProcessor:
                                 self._smart_turn_wait_count += 1
                                 self._silence_chunks = 0
                                 return
-                        # Turn is complete (or max waits exceeded) — fire callback
+                        # Turn is complete (or max waits exceeded) — populate metrics
+                        now = time.perf_counter()
+                        silence_wait_ms = (
+                            (now - self._silence_start_time) * 1000
+                            if self._silence_start_time else 0.0
+                        )
+                        self.last_turn_metrics = {
+                            "vad_silence_wait_ms": round(silence_wait_ms, 1),
+                            "smart_turn_inference_ms": round(self._smart_turn_accum_ms, 1),
+                            "smart_turn_waits": self._smart_turn_wait_count,
+                        }
+                        # Fire callback
                         if self._on_speech_stopped:
                             self._on_speech_stopped(
                                 self._total_audio_ms,
@@ -194,6 +216,8 @@ class VADProcessor:
                     self._speech_chunks = 0
                     self._silence_chunks = 0
                     self._smart_turn_wait_count = 0
+                    self._silence_start_time = None
+                    self._smart_turn_accum_ms = 0.0
                     self._speech_audio.clear()
                     self._prefix_buffer.clear()
 
@@ -206,6 +230,8 @@ class VADProcessor:
         self._silence_chunks = 0
         self._speech_chunks = 0
         self._smart_turn_wait_count = 0
+        self._silence_start_time = None
+        self._smart_turn_accum_ms = 0.0
         self._prefix_buffer.clear()
         self._speech_audio.clear()
         # Reset Silero model state

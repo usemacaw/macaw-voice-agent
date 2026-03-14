@@ -94,6 +94,16 @@ PIPELINE_CONFIG = {
     "sentence_timeout": _env_float("PIPELINE_SENTENCE_TIMEOUT", 15.0, 1.0, 120.0),
 }
 
+CONTEXT_CONFIG = {
+    "max_context_tokens": _env_int("LLM_MAX_CONTEXT_TOKENS", 4000, 500, 128000),
+    "window_fallback": _env_int("LLM_WINDOW_FALLBACK", 8, 2, 50),
+}
+
+SLO_CONFIG = {
+    "first_audio_ms": _env_float("SLO_FIRST_AUDIO_MS", 1500.0, 100.0, 30000.0),
+    "first_audio_tool_ms": _env_float("SLO_FIRST_AUDIO_TOOL_MS", 5000.0, 500.0, 60000.0),
+}
+
 TOOL_CONFIG = {
     "enable_mock_tools": os.getenv("TOOL_ENABLE_MOCK", "false").lower() == "true",
     "enable_web_search": os.getenv("TOOL_ENABLE_WEB_SEARCH", "false").lower() == "true",
@@ -160,6 +170,18 @@ class ConnectionPolicy:
 
 
 @dataclass(frozen=True)
+class ContextPolicy:
+    max_context_tokens: int
+    window_fallback: int
+
+
+@dataclass(frozen=True)
+class SLOPolicy:
+    first_audio_ms: float
+    first_audio_tool_ms: float
+
+
+@dataclass(frozen=True)
 class ToolPolicy:
     enable_mock_tools: bool
     enable_web_search: bool
@@ -173,4 +195,6 @@ VAD = VadPolicy(**VAD_CONFIG)
 PIPELINE = PipelinePolicy(**PIPELINE_CONFIG)
 LLM = LLMPolicy(**LLM_CONFIG)
 CONNECTION = ConnectionPolicy(**WS_CONFIG)
+CONTEXT = ContextPolicy(**CONTEXT_CONFIG)
+SLO = SLOPolicy(**SLO_CONFIG)
 TOOL = ToolPolicy(**TOOL_CONFIG)

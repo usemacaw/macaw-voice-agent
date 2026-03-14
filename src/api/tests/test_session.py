@@ -179,6 +179,9 @@ class FailingTTS(FakeTTS):
 class SlowLLM:
     """LLM that yields slowly for cancellation testing."""
 
+    last_ttft_ms: float = 0.0
+    last_stream_total_ms: float = 0.0
+
     async def generate_stream(self, messages, system="", tools=None, temperature=0.8, max_tokens=1024):
         for chunk in ["Hello", " ", "world"]:
             await asyncio.sleep(0.5)

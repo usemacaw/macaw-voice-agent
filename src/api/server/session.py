@@ -1,9 +1,14 @@
 """
-RealtimeSession — per-connection state machine.
+RealtimeSession — per-connection protocol facade.
 
-Manages session config, conversation items, audio buffer,
-and delegates audio input to AudioInputHandler and response
-execution to ResponseRunner.
+Thin layer that:
+- Dispatches client events to handlers
+- Manages connection lifecycle (auth, rate limit, idle timeout)
+- Delegates conversation state to ConversationStore
+- Delegates response execution to ResponseRunner
+
+Does NOT contain: conversation logic, response generation, audio processing,
+tool execution, or context building.
 """
 
 from __future__ import annotations
@@ -14,7 +19,6 @@ import json
 import logging
 import time
 import uuid
-from collections import deque
 from typing import TYPE_CHECKING
 
 import websockets.exceptions
@@ -22,6 +26,7 @@ import websockets.exceptions
 from audio.codec import API_SAMPLE_RATE, INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH, decode_audio_from_client
 from config import LLM
 from protocol import events
+from protocol.contract import MAX_EVENTS_PER_SECOND, SESSION_IDLE_TIMEOUT_S
 from protocol.event_emitter import EventEmitter, SlowClientError
 from protocol.models import (
     ConversationItem,
@@ -31,9 +36,9 @@ from protocol.models import (
     SessionConfigValidationError,
 )
 from server.audio_input import AudioInputCallbacks, AudioInputHandler
+from server.conversation_store import ConversationStore, MAX_CONVERSATION_ITEMS
 from server.response_runner import ResponseContext, ResponseRunner
-
-from tools.recall_memory import ConversationMemory
+from server.system_metrics import SYSTEM_METRICS
 
 if TYPE_CHECKING:
     from providers.asr import ASRProvider
@@ -47,18 +52,15 @@ logger = logging.getLogger("open-voice-api.session")
 # Maximum audio buffer size in manual commit mode (10 minutes at 8kHz 16-bit)
 _MAX_AUDIO_BUFFER_BYTES = 10 * 60 * INTERNAL_SAMPLE_RATE * SAMPLE_WIDTH
 
-# Maximum conversation items kept in memory (FIFO eviction of oldest)
-_MAX_CONVERSATION_ITEMS = 200
-
-# Rate limiting: max events per second from a single client
-_MAX_EVENTS_PER_SECOND = 200
-
-# Session idle timeout: disconnect if no message received within this period (seconds)
-_SESSION_IDLE_TIMEOUT_S = float(600)  # 10 minutes
-
 
 class RealtimeSession:
-    """Per-connection state machine implementing the OpenAI Realtime protocol."""
+    """Per-connection protocol facade implementing the OpenAI Realtime protocol.
+
+    This class is intentionally thin — a facade that delegates to:
+    - ConversationStore: items, memory, locking
+    - AudioInputHandler: VAD, ASR, speech detection
+    - ResponseRunner: LLM, tools, TTS, audio streaming
+    """
 
     def __init__(
         self,
@@ -81,20 +83,17 @@ class RealtimeSession:
             instructions=LLM.system_prompt,
             temperature=LLM.temperature,
         )
-        self._items: deque[ConversationItem] = deque(maxlen=_MAX_CONVERSATION_ITEMS)
+        self._store = ConversationStore()
         self._audio_buffer = bytearray()
         self._emitter = EventEmitter(ws, self.session_id)
 
-        # Conversation memory for history search tool
-        self._memory = ConversationMemory()
+        # Fork tool registry per session for recall_memory
         if self._tool_registry is not None:
             self._tool_registry = self._setup_session_tools(self._tool_registry)
 
         # Active response task
         self._response_task: asyncio.Task | None = None
-
-        # Lock to serialize state mutations (items, response_task)
-        self._state_lock = asyncio.Lock()
+        self._active_response_id: str | None = None
 
         # Audio input handler (VAD + ASR)
         self._audio_input = AudioInputHandler(
@@ -124,20 +123,27 @@ class RealtimeSession:
         # Rate limiting
         self._event_timestamps: list[float] = []
 
+        SYSTEM_METRICS.total_sessions += 1
+
     def _setup_session_tools(self, registry: ToolRegistry) -> ToolRegistry:
         """Fork the global tool registry and bind per-session tools."""
         from tools.recall_memory import register_recall_handler
         forked = registry.fork()
-        register_recall_handler(forked, self._memory)
+        register_recall_handler(forked, self._store.memory)
         return forked
 
     # ---- Audio Input Callbacks ----
 
     async def _cancel_active_response(self) -> bool:
         """Barge-in: cancel active response if running. Returns True if cancelled."""
-        async with self._state_lock:
+        async with self._store.lock:
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
+                # Fence: invalidate response so late events are dropped
+                if self._active_response_id:
+                    self._emitter.invalidate_response(self._active_response_id)
+                    self._active_response_id = None
+                SYSTEM_METRICS.record_cancel()
                 logger.info(
                     f"[{self.session_id[:8]}] Barge-in: cancelling active response"
                 )
@@ -148,9 +154,9 @@ class RealtimeSession:
         self, item: ConversationItem, transcript: str
     ) -> None:
         """Called when ASR transcription is ready: add item, emit events, auto-respond."""
-        async with self._state_lock:
-            prev_id = self._items[-1].id if self._items else ""
-            self._append_item(item)
+        async with self._store.lock:
+            prev_id = self._store.last_id()
+            self._store.append(item)
 
         await self._emitter.emit(
             events.input_audio_buffer_committed("", prev_id, item.id)
@@ -167,33 +173,12 @@ class RealtimeSession:
         if td and td.create_response:
             await self._start_response()
 
-    def _append_item(self, item: ConversationItem) -> None:
-        """Append item to conversation and feed conversation memory.
-
-        Must be called under _state_lock.
-        """
-        self._items.append(item)
-
-        # Feed conversation memory for recall_memory tool
-        if item.type == "message" and item.role in ("user", "assistant"):
-            text = ""
-            for part in item.content:
-                if part.type in ("input_text", "text") and part.text:
-                    text += part.text + " "
-                elif part.type in ("input_audio", "audio") and part.transcript:
-                    text += part.transcript + " "
-            if text.strip():
-                self._memory.add(item.role, text.strip())
-
-    # deque with maxlen auto-evicts oldest items — no manual enforcement needed
-
     def _check_rate_limit(self) -> bool:
         """Check if client is sending events too fast. Returns True if allowed."""
         now = time.monotonic()
-        # Remove timestamps older than 1 second
         cutoff = now - 1.0
         self._event_timestamps = [t for t in self._event_timestamps if t > cutoff]
-        if len(self._event_timestamps) >= _MAX_EVENTS_PER_SECOND:
+        if len(self._event_timestamps) >= MAX_EVENTS_PER_SECOND:
             return False
         self._event_timestamps.append(now)
         return True
@@ -202,7 +187,6 @@ class RealtimeSession:
 
     async def run(self) -> None:
         """Main session loop: receive and dispatch client events."""
-        # Send initial events
         await self._emitter.emit(
             events.session_created("", self.session_id, self._config)
         )
@@ -214,17 +198,16 @@ class RealtimeSession:
             while True:
                 try:
                     message = await asyncio.wait_for(
-                        self._ws.recv(), timeout=_SESSION_IDLE_TIMEOUT_S
+                        self._ws.recv(), timeout=SESSION_IDLE_TIMEOUT_S
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"[{self.session_id[:8]}] Session idle timeout "
-                        f"({_SESSION_IDLE_TIMEOUT_S:.0f}s), disconnecting"
+                        f"({SESSION_IDLE_TIMEOUT_S:.0f}s), disconnecting"
                     )
                     break
 
                 try:
-                    # Rate limiting
                     if not self._check_rate_limit():
                         await self._emitter.emit(
                             events.error_event(
@@ -318,8 +301,6 @@ class RealtimeSession:
         self._audio_append_count += 1
         self._audio_bytes_received += len(pcm)
 
-        # In VAD mode, don't accumulate in _audio_buffer (VAD tracks its own speech_audio).
-        # Only accumulate for manual commit mode.
         if not self._audio_input.vad:
             if len(self._audio_buffer) + len(pcm) > _MAX_AUDIO_BUFFER_BYTES:
                 logger.warning(
@@ -351,11 +332,10 @@ class RealtimeSession:
                 f"pcm_bytes={self._audio_bytes_received} ({audio_duration_ms:.0f}ms), "
                 f"vad=[{vad_status}], "
                 f"asr_stream={self._audio_input._asr_stream_id is not None}, "
-                f"items={len(self._items)}"
+                f"items={len(self._store.items)}"
             )
             self._last_metrics_log = now
 
-        # Feed to VAD and ASR streaming via handler
         self._audio_input.feed_audio(pcm)
         await self._audio_input.feed_asr_chunk(pcm)
 
@@ -373,7 +353,6 @@ class RealtimeSession:
         if self._audio_input.vad:
             self._audio_input.vad.reset()
 
-        # Transcribe
         transcript = await self._asr.transcribe(audio_data)
 
         item = ConversationItem(
@@ -383,9 +362,9 @@ class RealtimeSession:
             content=[ContentPart(type="input_audio", transcript=transcript)],
             status="completed",
         )
-        async with self._state_lock:
-            prev_id = self._items[-1].id if self._items else ""
-            self._append_item(item)
+        async with self._store.lock:
+            prev_id = self._store.last_id()
+            self._store.append(item)
 
         await self._emitter.emit(events.input_audio_buffer_committed("", prev_id, item_id))
         await self._emitter.emit(events.conversation_item_created("", prev_id, item))
@@ -407,7 +386,6 @@ class RealtimeSession:
             item_data["id"] = f"item_{uuid.uuid4().hex[:24]}"
         item = ConversationItem.from_dict(item_data)
 
-        # Validate item from client input
         try:
             item.validate()
         except ConversationItemValidationError as e:
@@ -416,21 +394,15 @@ class RealtimeSession:
             )
             return
 
-        async with self._state_lock:
-            prev_id = self._items[-1].id if self._items else ""
-            self._append_item(item)
+        async with self._store.lock:
+            prev_id = self._store.last_id()
+            self._store.append(item)
         await self._emitter.emit(events.conversation_item_created("", prev_id, item))
 
     async def _handle_conversation_item_delete(self, data: dict) -> None:
         item_id = data.get("item_id", "")
-        async with self._state_lock:
-            original_len = len(self._items)
-            filtered = deque(
-                (i for i in self._items if i.id != item_id),
-                maxlen=_MAX_CONVERSATION_ITEMS,
-            )
-            found = len(filtered) < original_len
-            self._items = filtered
+        async with self._store.lock:
+            found = self._store.delete(item_id)
         if not found:
             await self._emitter.emit(
                 events.error_event("", f"Item not found: {item_id}", code="item_not_found")
@@ -440,12 +412,8 @@ class RealtimeSession:
 
     async def _handle_conversation_item_retrieve(self, data: dict) -> None:
         item_id = data.get("item_id", "")
-        async with self._state_lock:
-            found_item = None
-            for item in self._items:
-                if item.id == item_id:
-                    found_item = item
-                    break
+        async with self._store.lock:
+            found_item = self._store.find(item_id)
         if found_item is not None:
             await self._emitter.emit(events.conversation_item_retrieved("", found_item))
         else:
@@ -458,22 +426,16 @@ class RealtimeSession:
         content_index = data.get("content_index", 0)
         audio_end_ms = data.get("audio_end_ms", 0)
 
-        async with self._state_lock:
-            found = False
-            for item in self._items:
-                if item.id == item_id:
-                    found = True
-                    # Truncate audio content
-                    if content_index < len(item.content):
-                        part = item.content[content_index]
-                        if part.audio:
-                            # Calculate bytes to keep (API_SAMPLE_RATE, 16-bit)
-                            bytes_to_keep = int(audio_end_ms / 1000 * API_SAMPLE_RATE * SAMPLE_WIDTH)
-                            audio_bytes = base64.b64decode(part.audio)
-                            part.audio = base64.b64encode(audio_bytes[:bytes_to_keep]).decode("ascii")
-                    break
+        async with self._store.lock:
+            item = self._store.find(item_id)
+            if item and content_index < len(item.content):
+                part = item.content[content_index]
+                if part.audio:
+                    bytes_to_keep = int(audio_end_ms / 1000 * API_SAMPLE_RATE * SAMPLE_WIDTH)
+                    audio_bytes = base64.b64decode(part.audio)
+                    part.audio = base64.b64encode(audio_bytes[:bytes_to_keep]).decode("ascii")
 
-        if found:
+        if item:
             await self._emitter.emit(
                 events.conversation_item_truncated("", item_id, content_index, audio_end_ms)
             )
@@ -487,11 +449,13 @@ class RealtimeSession:
 
     async def _handle_response_cancel(self, data: dict) -> None:
         task = None
-        async with self._state_lock:
+        async with self._store.lock:
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
+                if self._active_response_id:
+                    self._emitter.invalidate_response(self._active_response_id)
+                    self._active_response_id = None
                 task = self._response_task
-        # Await outside lock to avoid holding lock during cancellation
         if task is not None:
             try:
                 await task
@@ -501,20 +465,24 @@ class RealtimeSession:
                 logger.warning(f"[{self.session_id[:8]}] Error during response cancel: {e}")
 
     async def _handle_output_audio_buffer_clear(self, data: dict) -> None:
-        # Client wants to clear output audio — cancel active response
-        async with self._state_lock:
+        async with self._store.lock:
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
+                if self._active_response_id:
+                    self._emitter.invalidate_response(self._active_response_id)
+                    self._active_response_id = None
 
     # ---- Response Pipeline ----
 
     async def _start_response(self) -> None:
-        # Cancel any existing response OUTSIDE the lock to avoid deadlock
-        # (the response task itself acquires _state_lock internally)
         prev_task = None
-        async with self._state_lock:
+        async with self._store.lock:
             if self._response_task and not self._response_task.done():
                 self._response_task.cancel()
+                # Fence: invalidate previous response so late events are dropped
+                if self._active_response_id:
+                    self._emitter.invalidate_response(self._active_response_id)
+                    self._active_response_id = None
                 prev_task = self._response_task
 
         if prev_task is not None:
@@ -525,15 +493,19 @@ class RealtimeSession:
             except Exception as e:
                 logger.warning(f"[{self.session_id[:8]}] Error cancelling previous response: {e}")
 
-        async with self._state_lock:
+        async with self._store.lock:
             self._response_task = asyncio.create_task(self._run_response())
 
     async def _run_response(self) -> None:
         """Create a ResponseRunner and delegate the full response cycle."""
         response_id = f"resp_{uuid.uuid4().hex[:24]}"
 
-        # Prepare prior metrics from speech/ASR phase
+        # Register fence so late events from previous responses are dropped
+        self._active_response_id = response_id
+        self._emitter.set_active_response(response_id)
+
         self._turn_count += 1
+        SYSTEM_METRICS.record_response()
         prior_metrics = dict(self._audio_input.response_metrics)
 
         runner = ResponseRunner(
@@ -546,9 +518,9 @@ class RealtimeSession:
         )
 
         ctx = ResponseContext(
-            items=self._items,
-            state_lock=self._state_lock,
-            append_item=self._append_item,
+            items=self._store.items,
+            state_lock=self._store.lock,
+            append_item=self._store.append,
             speech_stopped_at=self._audio_input.speech_stopped_at,
             turn_count=self._turn_count,
             session_start=self._session_start,
@@ -557,10 +529,9 @@ class RealtimeSession:
 
         await runner.run(response_id, ctx, prior_metrics)
 
-        # Store runner metrics for the next cycle
         self._audio_input.response_metrics = runner.metrics
 
-    # Handler dispatch map: event type → method name (avoids unbound method references)
+    # Handler dispatch map
     _HANDLER_MAP: dict[str, str] = {
         "session.update": "_handle_session_update",
         "input_audio_buffer.append": "_handle_input_audio_buffer_append",

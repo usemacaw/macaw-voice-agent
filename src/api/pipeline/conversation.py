@@ -2,11 +2,17 @@
 Conversation history management.
 
 Converts ConversationItems to LLM messages format.
+Supports token-budget windowing with pinning of important items.
 """
 
 from __future__ import annotations
 
 from protocol.models import ConversationItem
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for mixed pt/en text."""
+    return max(1, len(text) // 4)
 
 
 def items_to_messages(items: list[ConversationItem]) -> list[dict]:
@@ -104,6 +110,100 @@ def items_to_windowed_messages(
 
     messages = items_to_messages(windowed)
     return _clean_orphan_tool_messages(messages)
+
+
+def items_to_budget_messages(
+    items: list[ConversationItem],
+    max_tokens: int = 4000,
+    window_fallback: int = 8,
+) -> list[dict]:
+    """Convert items to messages using a token budget with smart pinning.
+
+    Walks items from newest to oldest, accumulating estimated token count.
+    Stops when the budget is exhausted.
+
+    Pinning rules:
+    - The first user message is always pinned (establishes topic/identity).
+    - Tool call/result pairs are kept together.
+
+    Falls back to item-count windowing if all items fit within budget.
+
+    Args:
+        items: Full conversation history.
+        max_tokens: Maximum estimated tokens to include.
+        window_fallback: Maximum items even if budget allows more.
+    """
+    if not items:
+        return []
+
+    n = len(items)
+    if n <= 2:
+        return _clean_orphan_tool_messages(items_to_messages(items))
+
+    # Find the first user message for pinning
+    first_user_idx: int | None = None
+    for i, item in enumerate(items):
+        if item.type == "message" and item.role == "user":
+            first_user_idx = i
+            break
+
+    # Walk from newest to oldest, accumulating tokens
+    selected_indices: set[int] = set()
+    token_count = 0
+
+    for i in range(n - 1, -1, -1):
+        item = items[i]
+        item_tokens = _item_token_estimate(item)
+
+        if token_count + item_tokens > max_tokens and len(selected_indices) > 0:
+            break
+
+        selected_indices.add(i)
+        token_count += item_tokens
+
+        # If we selected a function_call_output, also select the preceding call
+        if item.type == "function_call_output" and i > 0:
+            prev = items[i - 1]
+            if prev.type == "function_call" and i - 1 not in selected_indices:
+                selected_indices.add(i - 1)
+                token_count += _item_token_estimate(prev)
+
+        # If we selected a function_call, also select the following output
+        if item.type == "function_call" and i + 1 < n:
+            nxt = items[i + 1]
+            if nxt.type == "function_call_output" and i + 1 not in selected_indices:
+                selected_indices.add(i + 1)
+                token_count += _item_token_estimate(nxt)
+
+        # Apply item count limit
+        if len(selected_indices) >= window_fallback:
+            break
+
+    # Pin first user message
+    if first_user_idx is not None and first_user_idx not in selected_indices:
+        selected_indices.add(first_user_idx)
+
+    # Build messages in original order
+    selected_items = [items[i] for i in sorted(selected_indices)]
+    messages = items_to_messages(selected_items)
+    return _clean_orphan_tool_messages(messages)
+
+
+def _item_token_estimate(item: ConversationItem) -> int:
+    """Estimate token count for a single conversation item."""
+    text = ""
+    if item.type == "message":
+        for part in item.content:
+            if part.text:
+                text += part.text
+            if part.transcript:
+                text += part.transcript
+    elif item.type == "function_call":
+        text = (item.name or "") + (item.arguments or "")
+    elif item.type == "function_call_output":
+        text = item.output or ""
+    # Minimum overhead per message (role, formatting)
+    return _estimate_tokens(text) + 4
 
 
 def _clean_orphan_tool_messages(messages: list[dict]) -> list[dict]:

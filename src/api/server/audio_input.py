@@ -21,6 +21,7 @@ from audio.vad import VADProcessor
 from config import VAD
 from protocol import events
 from protocol.models import ContentPart, ConversationItem
+from providers.admission import ADMISSION
 
 if TYPE_CHECKING:
     from protocol.event_emitter import EventEmitter
@@ -222,6 +223,11 @@ class AudioInputHandler:
 
         self._speech_stopped_at = time.perf_counter()
         self._response_metrics["speech_rms"] = round(rms, 1)
+
+        # Capture turn detection metrics from VAD (silence wait, Smart Turn timing)
+        if self._vad and self._vad.last_turn_metrics:
+            self._response_metrics.update(self._vad.last_turn_metrics)
+
         await self._handle_speech_stopped(audio_end_ms, speech_audio, item_id)
 
     async def _handle_speech_stopped(
@@ -261,7 +267,8 @@ class AudioInputHandler:
 
         if self._asr_stream_id == item_id and self._asr.supports_streaming:
             asr_mode = "streaming"
-            transcript = await self._asr.finish_stream(item_id)
+            async with ADMISSION.asr.acquire():
+                transcript = await self._asr.finish_stream(item_id)
             async with self._asr_lock:
                 if self._asr_stream_id == item_id:
                     self._asr_stream_id = None
@@ -279,7 +286,8 @@ class AudioInputHandler:
                     f"({len(speech_audio)} bytes)"
                 )
                 t0 = time.perf_counter()
-                transcript = await self._asr.transcribe(speech_audio)
+                async with ADMISSION.asr.acquire():
+                    transcript = await self._asr.transcribe(speech_audio)
                 asr_ms = (time.perf_counter() - t0) * 1000
                 logger.info(
                     f"[{self._session_id[:8]}] ASR (batch-fallback): {asr_ms:.0f}ms → "
@@ -297,7 +305,8 @@ class AudioInputHandler:
                 async with self._asr_lock:
                     if self._asr_stream_id == item_id:
                         self._asr_stream_id = None
-            transcript = await self._asr.transcribe(speech_audio)
+            async with ADMISSION.asr.acquire():
+                transcript = await self._asr.transcribe(speech_audio)
             asr_ms = (time.perf_counter() - t0) * 1000
             logger.info(
                 f"[{self._session_id[:8]}] ASR (batch): {asr_ms:.0f}ms → "

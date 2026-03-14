@@ -20,6 +20,7 @@ from typing import AsyncGenerator, Optional, TYPE_CHECKING
 from audio.codec import INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH
 from config import PIPELINE
 from pipeline.sentence_splitter import generate_sentences, split_long_sentence
+from providers.admission import ADMISSION
 
 # Strip emojis from sentences before TTS
 _EMOJI_RE = re.compile(
@@ -52,6 +53,9 @@ class PipelineMetrics:
     tts_total_ms: float = 0.0
     tts_synth_ms: float = 0.0
     tts_wait_ms: float = 0.0
+    tts_first_chunk_ms: float = 0.0
+    tts_queue_max_depth: int = 0
+    tts_calls: int = 0
     llm_ttft_ms: float = 0.0
     llm_total_ms: float = 0.0
 
@@ -195,25 +199,26 @@ class SentencePipeline:
         max_chars = PIPELINE.max_sentence_chars
 
         try:
-            async for sentence in generate_sentences(
-                self._llm, messages, system=system, tools=tools,
-                temperature=temperature, max_tokens=max_tokens,
-            ):
-                sub_sentences = split_long_sentence(sentence, max_chars)
-                for sub in sub_sentences:
-                    clean = _EMOJI_RE.sub("", sub).strip()
-                    if not clean:
-                        continue
-                    sentence_index += 1
-                    await queue.put(clean)
+            async with ADMISSION.llm.acquire():
+                async for sentence in generate_sentences(
+                    self._llm, messages, system=system, tools=tools,
+                    temperature=temperature, max_tokens=max_tokens,
+                ):
+                    sub_sentences = split_long_sentence(sentence, max_chars)
+                    for sub in sub_sentences:
+                        clean = _EMOJI_RE.sub("", sub).strip()
+                        if not clean:
+                            continue
+                        sentence_index += 1
+                        await queue.put(clean)
 
-                    if sentence_index == 1:
-                        self._metrics.first_sentence_latency_ms = (
-                            (time.perf_counter() - produce_start) * 1000
-                        )
-                        logger.info(
-                            f"First sentence in {self._metrics.first_sentence_latency_ms:.0f}ms"
-                        )
+                        if sentence_index == 1:
+                            self._metrics.first_sentence_latency_ms = (
+                                (time.perf_counter() - produce_start) * 1000
+                            )
+                            logger.info(
+                                f"First sentence in {self._metrics.first_sentence_latency_ms:.0f}ms"
+                            )
         finally:
             # Capture LLM-level timing from the provider
             self._metrics.llm_ttft_ms = self._llm.last_ttft_ms
@@ -226,6 +231,7 @@ class SentencePipeline:
         audio_queue: asyncio.Queue,
     ) -> None:
         use_streaming = self._tts.supports_streaming
+        first_chunk_recorded = False
         try:
             while True:
                 wait_start = time.perf_counter()
@@ -243,20 +249,39 @@ class SentencePipeline:
                 if sentence is None:
                     break
 
+                # Track queue depth high watermark
+                depth = sentence_queue.qsize()
+                if depth > self._metrics.tts_queue_max_depth:
+                    self._metrics.tts_queue_max_depth = depth
+
                 try:
                     synth_start = time.perf_counter()
-                    if use_streaming:
-                        chunk_idx = 0
-                        async for tts_chunk in self._tts.synthesize_stream(sentence):
-                            if tts_chunk:
-                                await audio_queue.put(
-                                    _AudioItem(sentence, tts_chunk, new_sentence=(chunk_idx == 0))
-                                )
-                                chunk_idx += 1
-                    else:
-                        audio = await self._tts.synthesize(sentence)
-                        if audio:
-                            await audio_queue.put(_AudioItem(sentence, audio))
+                    self._metrics.tts_calls += 1
+
+                    async with ADMISSION.tts.acquire():
+                        if use_streaming:
+                            chunk_idx = 0
+                            async for tts_chunk in self._tts.synthesize_stream(sentence):
+                                if tts_chunk:
+                                    # Record first chunk latency (once per pipeline)
+                                    if not first_chunk_recorded:
+                                        first_chunk_recorded = True
+                                        self._metrics.tts_first_chunk_ms = (
+                                            (time.perf_counter() - synth_start) * 1000
+                                        )
+                                    await audio_queue.put(
+                                        _AudioItem(sentence, tts_chunk, new_sentence=(chunk_idx == 0))
+                                    )
+                                    chunk_idx += 1
+                        else:
+                            audio = await self._tts.synthesize(sentence)
+                            if audio:
+                                if not first_chunk_recorded:
+                                    first_chunk_recorded = True
+                                    self._metrics.tts_first_chunk_ms = (
+                                        (time.perf_counter() - synth_start) * 1000
+                                    )
+                                await audio_queue.put(_AudioItem(sentence, audio))
 
                     synth_ms = (time.perf_counter() - synth_start) * 1000
                     self._metrics.tts_synth_ms += synth_ms
