@@ -74,12 +74,12 @@ class VLLMProvider(LLMProvider):
             if delta and delta.content:
                 if not first_token:
                     first_token = True
-                    ttft_ms = (time.perf_counter() - t0) * 1000
-                    logger.info(f"LLM first token in {ttft_ms:.0f}ms")
+                    self.last_ttft_ms = (time.perf_counter() - t0) * 1000
+                    logger.info(f"LLM first token in {self.last_ttft_ms:.0f}ms")
                 yield delta.content
 
-        total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"LLM stream complete: {total_ms:.0f}ms")
+        self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"LLM stream complete: {self.last_stream_total_ms:.0f}ms")
 
     async def generate_stream_with_tools(
         self,
@@ -118,8 +118,8 @@ class VLLMProvider(LLMProvider):
 
             if not first_token:
                 first_token = True
-                ttft_ms = (time.perf_counter() - t0) * 1000
-                logger.info(f"LLM first event in {ttft_ms:.0f}ms")
+                self.last_ttft_ms = (time.perf_counter() - t0) * 1000
+                logger.info(f"LLM first event in {self.last_ttft_ms:.0f}ms")
 
             if delta.content:
                 yield LLMStreamEvent(type="text_delta", text=delta.content)
@@ -152,8 +152,8 @@ class VLLMProvider(LLMProvider):
                 tool_name=info["name"],
             )
 
-        total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"LLM stream (with tools) complete: {total_ms:.0f}ms")
+        self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"LLM stream (with tools) complete: {self.last_stream_total_ms:.0f}ms")
 
     async def connect(self) -> None:
         pass

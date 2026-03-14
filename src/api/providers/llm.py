@@ -48,6 +48,10 @@ class LLMProvider(ABC):
 
     provider_name: str = ""
 
+    # Per-call timing metrics (set by provider implementations)
+    last_ttft_ms: float = 0.0
+    last_stream_total_ms: float = 0.0
+
     async def connect(self) -> None:
         """Connect to the LLM service. No-op by default."""
         pass

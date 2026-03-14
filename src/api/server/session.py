@@ -198,6 +198,14 @@ class RealtimeSession:
         self._last_metrics_log = time.monotonic()
         self._speech_stopped_at: float | None = None  # perf_counter timestamp
 
+        # Per-response observability metrics (reset at each response start)
+        self._response_metrics: dict[str, object] = {}
+
+        # Session-level counters for observability
+        self._session_start = time.perf_counter()
+        self._turn_count = 0
+        self._barge_in_count = 0
+
         # Rate limiting
         self._event_timestamps: list[float] = []
 
@@ -308,10 +316,13 @@ class RealtimeSession:
         async with self._state_lock:
             td = self._config.turn_detection
             if td and td.interrupt_response and self._response_task and not self._response_task.done():
-                logger.info(f"[{self.session_id[:8]}] Barge-in: cancelling active response (rms={rms:.0f})")
+                self._barge_in_count += 1
+                logger.info(f"[{self.session_id[:8]}] Barge-in #{self._barge_in_count}: cancelling active response (rms={rms:.0f})")
                 self._response_task.cancel()
 
         self._speech_stopped_at = time.perf_counter()
+        # Store VAD data for metrics
+        self._response_metrics["speech_rms"] = round(rms, 1)
         await self._handle_speech_stopped(audio_end_ms, speech_audio, item_id)
 
     async def _handle_speech_stopped(
@@ -359,8 +370,10 @@ class RealtimeSession:
         """Transcribe audio using streaming or batch ASR."""
         t0 = time.perf_counter()
         transcript = ""
+        asr_mode = "batch"
 
         if self._asr_stream_id == item_id and self._asr.supports_streaming:
+            asr_mode = "streaming"
             transcript = await self._asr.finish_stream(item_id)
             async with self._state_lock:
                 if self._asr_stream_id == item_id:
@@ -373,6 +386,7 @@ class RealtimeSession:
 
             # Fallback to batch if streaming returned empty
             if not transcript and speech_audio:
+                asr_mode = "batch-fallback"
                 logger.info(
                     f"[{self.session_id[:8]}] ASR streaming empty, falling back to batch "
                     f"({len(speech_audio)} bytes)"
@@ -399,6 +413,14 @@ class RealtimeSession:
                 f"[{self.session_id[:8]}] ASR (batch): {asr_ms:.0f}ms → "
                 f"\"{transcript[:80]}\" (empty={not transcript})"
             )
+
+        # Store for per-response observability
+        total_asr_ms = (time.perf_counter() - t0) * 1000
+        speech_ms = len(speech_audio) / (INTERNAL_SAMPLE_RATE * SAMPLE_WIDTH) * 1000
+        self._response_metrics["asr_ms"] = round(total_asr_ms, 1)
+        self._response_metrics["speech_ms"] = round(speech_ms, 1)
+        self._response_metrics["asr_mode"] = asr_mode
+        self._response_metrics["input_chars"] = len(transcript)
 
         return transcript
 
@@ -794,6 +816,22 @@ class RealtimeSession:
         )
         assistant_item = None
 
+        # Reset per-response metrics (preserve data set before response start)
+        prev = self._response_metrics
+        self._turn_count += 1
+        self._response_metrics = {
+            "response_id": response_id,
+            "turn": self._turn_count,
+            "session_duration_s": round(time.perf_counter() - self._session_start, 1),
+            "barge_in_count": self._barge_in_count,
+            "tools_used": [],
+            "tool_rounds": 0,
+        }
+        # Carry over metrics set during speech/transcription phase
+        for key in ("asr_ms", "speech_ms", "asr_mode", "input_chars", "speech_rms"):
+            if key in prev:
+                self._response_metrics[key] = prev[key]
+
         logger.info(
             f"[{self.session_id[:8]}] RESPONSE START: "
             f"items={len(self._items)}, has_audio={has_audio}, has_tools={has_tools}"
@@ -969,6 +1007,12 @@ class RealtimeSession:
                     })
                     in_tool_call = False
 
+            # Capture LLM timing from provider (set after stream completes)
+            if tool_round == 0:
+                # First round LLM TTFT is most meaningful for perceived latency
+                self._response_metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
+            self._response_metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
+
             # --- No tool calls: emit final response (text or audio) ---
             collected_text = _clean_for_voice(collected_text)
             if not collected_tool_calls:
@@ -1002,6 +1046,10 @@ class RealtimeSession:
             )
 
             if server_side:
+                # Track tool names for metrics
+                for tc in collected_tool_calls:
+                    self._response_metrics.setdefault("tools_used", []).append(tc["name"])
+
                 # Server-side execution: filler + execute + re-call LLM
                 all_ok = await self._execute_tools_server_side(
                     response_id, output_index, collected_tool_calls, has_audio,
@@ -1039,6 +1087,13 @@ class RealtimeSession:
         )
         await self._emitter.emit(
             events.response_done("", response_id, status="completed")
+        )
+
+        # Emit per-response observability metrics
+        self._response_metrics["total_ms"] = round(response_ms, 1)
+        self._response_metrics["tool_rounds"] = tool_round + 1
+        await self._emitter.emit(
+            events.macaw_metrics(response_id, self._response_metrics)
         )
 
     async def _execute_tools_server_side(
@@ -1100,20 +1155,30 @@ class RealtimeSession:
                 )
             )
 
-            # Execute tool
+            # Execute tool with timing
+            tool_t0 = time.perf_counter()
             result_json = await self._tool_registry.execute(tc_name, tc_args)
+            tool_exec_ms = (time.perf_counter() - tool_t0) * 1000
             logger.info(
-                f"[{self.session_id[:8]}] Tool '{tc_name}' result: "
+                f"[{self.session_id[:8]}] Tool '{tc_name}' result ({tool_exec_ms:.0f}ms): "
                 f"{result_json[:200]}"
             )
 
-            # Check if tool returned an error
+            # Store per-tool timing
+            tool_timings = self._response_metrics.setdefault("tool_timings", [])
+            tool_ok = True
             try:
                 result_data = json.loads(result_json)
                 if isinstance(result_data, dict) and "error" in result_data:
                     any_error = True
+                    tool_ok = False
             except (json.JSONDecodeError, TypeError):
                 pass
+            tool_timings.append({
+                "name": tc_name,
+                "exec_ms": round(tool_exec_ms, 1),
+                "ok": tool_ok,
+            })
 
             # Create function_call_output item
             fco_item_id = f"item_{uuid.uuid4().hex[:24]}"
@@ -1266,6 +1331,7 @@ class RealtimeSession:
                         e2e_ms = (
                             time.perf_counter() - self._speech_stopped_at
                         ) * 1000
+                        self._response_metrics["e2e_ms"] = round(e2e_ms, 1)
                         logger.info(
                             f"[{self.session_id[:8]}] E2E LATENCY: {e2e_ms:.0f}ms "
                             f"(speech_stopped → first_audio_sent)"
@@ -1286,6 +1352,7 @@ class RealtimeSession:
                     e2e_ms = (
                         time.perf_counter() - self._speech_stopped_at
                     ) * 1000
+                    self._response_metrics["e2e_ms"] = round(e2e_ms, 1)
                     logger.info(
                         f"[{self.session_id[:8]}] E2E LATENCY: {e2e_ms:.0f}ms "
                         f"(speech_stopped → first_audio_sent)"
@@ -1551,6 +1618,7 @@ class RealtimeSession:
                 first_audio_sent = True
                 if self._speech_stopped_at is not None:
                     e2e_ms = (time.perf_counter() - self._speech_stopped_at) * 1000
+                    self._response_metrics["e2e_ms"] = round(e2e_ms, 1)
                     logger.info(
                         f"[{self.session_id[:8]}] E2E LATENCY: {e2e_ms:.0f}ms "
                         f"(speech_stopped → first_audio_sent)"
@@ -1567,6 +1635,23 @@ class RealtimeSession:
                     )
                 )
                 full_transcript += delta
+
+        # Capture pipeline metrics for observability
+        pm = pipeline.metrics
+        response_audio_s = (pm.audio_chunks_produced * 0.1) if pm.audio_chunks_produced else 0
+        self._response_metrics.update({
+            "llm_ttft_ms": round(pm.llm_ttft_ms, 1),
+            "llm_total_ms": round(pm.llm_total_ms, 1),
+            "llm_first_sentence_ms": round(pm.first_sentence_latency_ms, 1),
+            "pipeline_first_audio_ms": round(pm.first_audio_latency_ms, 1),
+            "pipeline_total_ms": round(pm.total_latency_ms, 1),
+            "tts_synth_ms": round(pm.tts_synth_ms, 1),
+            "tts_wait_ms": round(pm.tts_wait_ms, 1),
+            "sentences": pm.sentences_generated,
+            "audio_chunks": pm.audio_chunks_produced,
+            "output_chars": len(full_transcript),
+            "response_audio_ms": round(response_audio_s * 1000, 1),
+        })
 
         # Update assistant item — don't store accumulated audio base64
         # (already streamed via deltas, storing would bloat memory/messages)
@@ -1659,6 +1744,19 @@ class RealtimeSession:
                 "", response_id, status="completed",
                 output=[assistant_item.to_dict()],
             )
+        )
+
+        # Enrich with LLM timing (for non-tool path)
+        if "llm_ttft_ms" not in self._response_metrics:
+            self._response_metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
+            self._response_metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
+        if "output_chars" not in self._response_metrics:
+            self._response_metrics["output_chars"] = len(full_transcript or full_text)
+
+        # Emit per-response observability metrics
+        self._response_metrics["total_ms"] = round(response_ms, 1)
+        await self._emitter.emit(
+            events.macaw_metrics(response_id, self._response_metrics)
         )
 
     # Handler dispatch map: event type → method name (avoids unbound method references)

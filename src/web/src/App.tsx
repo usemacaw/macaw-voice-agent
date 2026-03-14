@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useRealtimeSession } from "./hooks/useRealtimeSession";
 import { Orb } from "./components/Orb";
 import { TranscriptPanel } from "./components/TranscriptPanel";
-import { Mic, MicOff, MessageSquareText, X } from "lucide-react";
+import { MetricsPanel } from "./components/MetricsPanel";
+import { Mic, MicOff, MessageSquareText, X, Activity } from "lucide-react";
 
 type OrbState = "idle" | "listening" | "speaking" | "thinking";
 
@@ -10,6 +11,7 @@ function App() {
   const {
     status,
     messages,
+    responseMetrics,
     isUserSpeaking,
     isAssistantSpeaking,
     connect,
@@ -17,6 +19,7 @@ function App() {
   } = useRealtimeSession();
 
   const [showTranscript, setShowTranscript] = useState(false);
+  const [showMetrics, setShowMetrics] = useState(false);
   const lastAssistantText = useRef("");
 
   // Determine orb state
@@ -96,17 +99,34 @@ function App() {
           <span className="text-sm text-muted">{statusLabel}</span>
         </div>
 
-        {messages.length > 0 && (
+        <div className="flex items-center gap-1">
           <button
-            onClick={() => setShowTranscript(!showTranscript)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm
+            onClick={() => setShowMetrics(!showMetrics)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs
                        text-muted hover:text-foreground hover:bg-surface-light
                        transition-colors cursor-pointer"
+            title="Métricas"
           >
-            {showTranscript ? <X size={16} /> : <MessageSquareText size={16} />}
-            {showTranscript ? "Fechar" : "Transcrição"}
+            <Activity size={14} />
+            {responseMetrics.length > 0 && (
+              <span className="text-[10px] font-mono text-accent">
+                {responseMetrics.length}
+              </span>
+            )}
           </button>
-        )}
+
+          {messages.length > 0 && (
+            <button
+              onClick={() => setShowTranscript(!showTranscript)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm
+                         text-muted hover:text-foreground hover:bg-surface-light
+                         transition-colors cursor-pointer"
+            >
+              {showTranscript ? <X size={16} /> : <MessageSquareText size={16} />}
+              {showTranscript ? "Fechar" : "Transcrição"}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Central orb */}
@@ -174,6 +194,14 @@ function App() {
         <TranscriptPanel
           messages={messages}
           onClose={() => setShowTranscript(false)}
+        />
+      )}
+
+      {/* Metrics panel */}
+      {showMetrics && (
+        <MetricsPanel
+          metrics={responseMetrics}
+          onClose={() => setShowMetrics(false)}
         />
       )}
     </div>

@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { AudioCapture } from "../audio/capture";
 import { AudioPlayback } from "../audio/playback";
-import type { Message, SessionStatus } from "../types";
+import type { Message, ResponseMetrics, SessionStatus, ToolTiming } from "../types";
 
 const WS_URL =
   import.meta.env.VITE_WS_URL || "ws://localhost:8765/v1/realtime";
@@ -52,6 +52,7 @@ export function useRealtimeSession() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
+  const [responseMetrics, setResponseMetrics] = useState<ResponseMetrics[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const captureRef = useRef<AudioCapture | null>(null);
@@ -209,6 +210,51 @@ export function useRealtimeSession() {
           break;
         }
 
+        case "macaw.metrics": {
+          const m = data.metrics as Record<string, unknown>;
+          if (m) {
+            const entry: ResponseMetrics = {
+              response_id: (data.response_id as string) || "",
+              timestamp: Date.now(),
+              // Session
+              turn: m.turn as number | undefined,
+              session_duration_s: m.session_duration_s as number | undefined,
+              barge_in_count: m.barge_in_count as number | undefined,
+              // VAD / Speech
+              speech_ms: m.speech_ms as number | undefined,
+              speech_rms: m.speech_rms as number | undefined,
+              // ASR
+              asr_ms: m.asr_ms as number | undefined,
+              asr_mode: m.asr_mode as string | undefined,
+              input_chars: m.input_chars as number | undefined,
+              // LLM
+              llm_ttft_ms: m.llm_ttft_ms as number | undefined,
+              llm_total_ms: m.llm_total_ms as number | undefined,
+              llm_first_sentence_ms: m.llm_first_sentence_ms as number | undefined,
+              // TTS
+              tts_synth_ms: m.tts_synth_ms as number | undefined,
+              tts_wait_ms: m.tts_wait_ms as number | undefined,
+              // Pipeline
+              e2e_ms: m.e2e_ms as number | undefined,
+              pipeline_first_audio_ms: m.pipeline_first_audio_ms as number | undefined,
+              pipeline_total_ms: m.pipeline_total_ms as number | undefined,
+              sentences: m.sentences as number | undefined,
+              audio_chunks: m.audio_chunks as number | undefined,
+              output_chars: m.output_chars as number | undefined,
+              response_audio_ms: m.response_audio_ms as number | undefined,
+              // Tools
+              tool_rounds: m.tool_rounds as number | undefined,
+              tools_used: m.tools_used as string[] | undefined,
+              tool_timings: m.tool_timings as ToolTiming[] | undefined,
+              // Total
+              total_ms: m.total_ms as number | undefined,
+            };
+            console.log("[OVA] Response metrics:", entry);
+            setResponseMetrics((prev) => [...prev, entry]);
+          }
+          break;
+        }
+
         case "error": {
           console.error("[OVA] Server error:", data);
           break;
@@ -223,6 +269,7 @@ export function useRealtimeSession() {
 
     setStatus("connecting");
     setMessages([]);
+    setResponseMetrics([]);
     metricsRef.current = new SessionMetrics();
 
     console.log(`[OVA] Connecting to ${WS_URL}...`);
@@ -308,6 +355,7 @@ export function useRealtimeSession() {
   return {
     status,
     messages,
+    responseMetrics,
     isUserSpeaking,
     isAssistantSpeaking,
     connect,

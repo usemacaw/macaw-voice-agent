@@ -332,3 +332,16 @@ def rate_limits_updated(event_id: str, rate_limits: list[dict]) -> dict:
         event_id=event_id,
         rate_limits=rate_limits,
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom extension events (macaw.*)
+# ---------------------------------------------------------------------------
+
+def macaw_metrics(response_id: str, metrics: dict) -> dict:
+    """Per-response observability metrics."""
+    return _server_event(
+        "macaw.metrics",
+        response_id=response_id,
+        metrics=metrics,
+    )
