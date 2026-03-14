@@ -1,0 +1,52 @@
+# Dependencies
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Build artifacts
+**/dist/
+**/build/
+**/*.egg-info/
+**/.venv/
+**/venv/
+
+# Git
+**/.git/
+
+# IDE
+**/.vscode/
+**/.idea/
+**/*.swp
+**/*.swo
+
+# OS
+**/.DS_Store
+**/Thumbs.db
+
+# Secrets
+**/.env
+!**/.env.example
+
+# Logs
+**/*.log
+**/nohup.out
+
+# Large files
+**/*.onnx
+**/*.bin
+**/*.pt
+**/*.pth
+**/*.safetensors
+**/*.gguf
+
+# Generated gRPC stubs (auto-generated, not useful to read)
+**/grpc_gen/*_pb2.py
+**/grpc_gen/*_pb2_grpc.py
+
+# Package lock files (verbose, low signal)
+**/package-lock.json
+**/yarn.lock

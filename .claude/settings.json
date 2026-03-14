@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Agent",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(pytest *)",
+      "Bash(pip *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(git *)",
+      "Bash(curl *)",
+      "Bash(grpcurl *)",
+      "Bash(tail *)",
+      "Bash(head *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(tree *)",
+      "Bash(wc *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(which *)",
+      "Bash(pwd)",
+      "Bash(kill *)",
+      "Bash(pgrep *)",
+      "Bash(pkill *)",
+      "Bash(ps *)",
+      "Bash(lsof *)",
+      "Bash(nohup *)",
+      "Bash(docker *)",
+      "Bash(docker-compose *)",
+      "Bash(ssh *)",
+      "Bash(autossh *)",
+      "Bash(vastai *)",
+      "Bash(cd *)",
+      "Bash(source *)",
+      "Bash(echo *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(find *)",
+      "Bash(xargs *)",
+      "Bash(diff *)",
+      "Bash(jq *)",
+      "Bash(sleep *)",
+      "WebFetch(domain:docs.python.org)",
+      "WebFetch(domain:react.dev)",
+      "WebFetch(domain:tailwindcss.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.vllm.ai)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:websockets.readthedocs.io)",
+      "WebFetch(domain:grpc.io)",
+      "WebFetch(domain:pytorch.org)",
+      "WebFetch(domain:numpy.org)",
+      "WebFetch(domain:vitejs.dev)",
+      "WebFetch(domain:stackoverflow.com)",
+      "WebFetch(domain:huggingface.co)",
+      "WebFetch(domain:arxiv.org)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(sudo *)",
+      "Bash(chmod 777 *)",
+      "Bash(git push --force *)",
+      "Bash(git checkout main)",
+      "Bash(git checkout master)",
+      "Bash(git revert *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; if [[ \"$FILE\" == *.py ]]; then python3 -m py_compile \"$FILE\" 2>&1 && echo \"{\\\"result\\\": \\\"ok\\\"}\" || echo \"{\\\"result\\\": \\\"syntax error\\\"}\" >&2; fi'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "PYTHONDONTWRITEBYTECODE": "1"
+  }
+}
