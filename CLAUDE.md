@@ -46,12 +46,14 @@ curl http://localhost:8765/health
 src/
 ├── api/                    # Servidor WebSocket principal (Python 3.11+)
 │   ├── main.py             # Entry point — cria providers, conecta, inicia WS server
-│   ├── config.py           # Carrega env vars com validação
+│   ├── config.py           # Env vars + frozen dataclass policies (VadPolicy, LLMPolicy, etc.)
 │   ├── .env                # Configuração ativa (NÃO committar)
 │   ├── .env.example        # Template de configuração
 │   ├── server/
 │   │   ├── ws_server.py    # WebSocket lifecycle, health endpoint, rate limit
-│   │   └── session.py      # RealtimeSession — state machine por conexão
+│   │   ├── session.py      # RealtimeSession — state machine por conexão (~577 linhas)
+│   │   ├── response_runner.py  # LLM→tools→TTS→audio events (extraído de session)
+│   │   └── audio_input.py  # VAD, ASR, RMS, speech detection (extraído de session)
 │   ├── pipeline/
 │   │   ├── sentence_pipeline.py  # LLM→TTS streaming (producer-consumer)
 │   │   └── conversation.py       # Histórico → messages, windowing (últimos 8 items)

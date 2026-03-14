@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from audio.codec import encode_audio_for_client
-from config import LLM_CONFIG
+from config import LLM
 from pipeline.conversation import items_to_messages, items_to_windowed_messages
 from pipeline.sentence_pipeline import SentencePipeline
 from protocol import events
@@ -225,7 +225,7 @@ class ResponseRunner:
             max_tokens = (
                 self._config.max_response_output_tokens
                 if isinstance(self._config.max_response_output_tokens, int)
-                else LLM_CONFIG["max_tokens"]
+                else LLM.max_tokens
             )
 
             if has_tools:

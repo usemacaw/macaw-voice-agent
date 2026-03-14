@@ -2,9 +2,12 @@
 Environment-based configuration for OpenVoiceAPI server.
 
 All settings loaded from env vars with sensible defaults.
+Frozen dataclasses provide type-safe access; legacy dicts remain for
+backward compatibility with providers not yet migrated.
 """
 
 import os
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
@@ -111,3 +114,63 @@ if _raw_log_level not in _VALID_LOG_LEVELS:
 LOG_CONFIG = {
     "level": _raw_log_level,
 }
+
+
+# ---------------------------------------------------------------------------
+# Frozen dataclass policies (type-safe access with autocomplete)
+# Legacy dicts above remain exported for backward compatibility.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VadPolicy:
+    aggressiveness: int
+    silence_threshold_ms: int
+    prefix_padding_ms: int
+    min_speech_ms: int
+    min_speech_rms: int
+
+
+@dataclass(frozen=True)
+class PipelinePolicy:
+    sentence_queue_size: int
+    tts_prefetch_size: int
+    max_sentence_chars: int
+    tts_timeout: float
+    sentence_timeout: float
+
+
+@dataclass(frozen=True)
+class LLMPolicy:
+    provider: str
+    model: str
+    max_tokens: int
+    temperature: float
+    timeout: float
+    system_prompt: str
+
+
+@dataclass(frozen=True)
+class ConnectionPolicy:
+    host: str
+    port: int
+    path: str
+    api_key: str
+    max_connections: int
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    enable_mock_tools: bool
+    enable_web_search: bool
+    timeout: float
+    max_rounds: int
+    default_filler: str
+
+
+# Instantiate from the dicts loaded above
+VAD = VadPolicy(**VAD_CONFIG)
+PIPELINE = PipelinePolicy(**PIPELINE_CONFIG)
+LLM = LLMPolicy(**LLM_CONFIG)
+CONNECTION = ConnectionPolicy(**WS_CONFIG)
+TOOL = ToolPolicy(**TOOL_CONFIG)

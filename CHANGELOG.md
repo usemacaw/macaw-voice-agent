@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `recv()` method on FakeWebSocket test helper for idle timeout compatibility
 
 ### Changed
+- Extracted `AudioInputHandler` from `RealtimeSession`: VAD, ASR, RMS, and speech detection logic moved to `server/audio_input.py` (~270 lines), reducing `session.py` from 769 to ~500 lines
+- Added frozen dataclass config policies (`VadPolicy`, `PipelinePolicy`, `LLMPolicy`, `ConnectionPolicy`, `ToolPolicy`) to `config.py` for type-safe access with IDE autocomplete; legacy dicts kept for backward compatibility
+- Migrated 4 priority consumers (`session.py`, `audio_input.py`, `response_runner.py`, `sentence_pipeline.py`) from dict-based config to policy dataclasses
 - Extracted `ResponseRunner` from `RealtimeSession`: response execution (LLM→tools→TTS→audio events) moved to `server/response_runner.py`, reducing `session.py` from 1,775 to 769 lines
 - Fixed pre-existing test bugs: added missing `warmup()` to FakeASR/FakeTTS and `last_ttft_ms`/`last_stream_total_ms` to FakeLLM
 - Switched default LLM to Qwen3-8B-AWQ: better tool calling accuracy at lower latency than Qwen2.5-14B

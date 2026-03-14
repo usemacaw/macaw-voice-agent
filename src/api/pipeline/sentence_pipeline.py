@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import AsyncGenerator, Optional, TYPE_CHECKING
 
 from audio.codec import INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH
-from config import PIPELINE_CONFIG
+from config import PIPELINE
 from providers.llm import split_long_sentence
 
 # Strip emojis from sentences before TTS
@@ -76,7 +76,7 @@ class SentencePipeline:
         self._llm = llm
         self._tts = tts
         self._queue_size = queue_size
-        self._prefetch_size = prefetch_size or PIPELINE_CONFIG["tts_prefetch_size"]
+        self._prefetch_size = prefetch_size or PIPELINE.tts_prefetch_size
         self._metrics = PipelineMetrics()
 
     @property
@@ -127,7 +127,7 @@ class SentencePipeline:
                 try:
                     item = await asyncio.wait_for(
                         audio_queue.get(),
-                        timeout=PIPELINE_CONFIG["tts_timeout"],
+                        timeout=PIPELINE.tts_timeout,
                     )
                 except asyncio.TimeoutError:
                     logger.warning("Timeout waiting for TTS audio")
@@ -192,7 +192,7 @@ class SentencePipeline:
     ) -> None:
         produce_start = time.perf_counter()
         sentence_index = 0
-        max_chars = PIPELINE_CONFIG["max_sentence_chars"]
+        max_chars = PIPELINE.max_sentence_chars
 
         try:
             async for sentence in self._llm.generate_sentences(
@@ -232,7 +232,7 @@ class SentencePipeline:
                 try:
                     sentence = await asyncio.wait_for(
                         sentence_queue.get(),
-                        timeout=PIPELINE_CONFIG["sentence_timeout"],
+                        timeout=PIPELINE.sentence_timeout,
                     )
                 except asyncio.TimeoutError:
                     break

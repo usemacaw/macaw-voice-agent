@@ -18,7 +18,8 @@ pytest tests/test_session.py -v
 ## Architecture
 
 - **Entry point:** `main.py` — creates providers (factory), connects with retry, starts WebSocket server
-- **Session per connection:** `server/session.py` — `RealtimeSession` is the state machine. Handles audio buffer, VAD, conversation items, response lifecycle
+- **Session per connection:** `server/session.py` — `RealtimeSession` is the state machine. Handles audio buffer, conversation items, response lifecycle. Delegates audio input to `server/audio_input.py` (VAD, ASR, RMS, barge-in) and response execution to `server/response_runner.py` (LLM→tools→TTS→audio)
+- **Config:** `config.py` — env vars loaded into dicts + frozen dataclass policies (`VadPolicy`, `LLMPolicy`, `PipelinePolicy`, etc.) for type-safe access
 - **Pipeline:** `pipeline/sentence_pipeline.py` — LLM streams sentences → queue → TTS worker synthesizes in parallel → audio chunks yielded to consumer
 - **Providers:** ABC + `ProviderRegistry[T]` with lazy auto-discovery. Registration happens at module bottom (`register_*_provider`)
 - **Protocol:** Events match OpenAI Realtime API 1:1. `protocol/events.py` builds JSON dicts, `event_emitter.py` sends them with backpressure (SlowClientError for structural events)
