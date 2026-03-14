@@ -50,10 +50,29 @@ logger = logging.getLogger("open-voice-api.session")
 # Strip <think>...</think> blocks from "thinking" models (e.g. Qwen3)
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
+# Emoji pattern: matches most Unicode emoji ranges
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map
+    "\U0001f1e0-\U0001f1ff"  # flags
+    "\U0001f900-\U0001f9ff"  # supplemental symbols
+    "\U0001fa00-\U0001fa6f"  # chess, extended-A
+    "\U0001fa70-\U0001faff"  # extended-B
+    "\U00002702-\U000027b0"  # dingbats
+    "\U000024c2-\U0001f251"  # enclosed characters
+    "\U0000fe0f"             # variation selector
+    "\U0000200d"             # zero-width joiner
+    "]+",
+)
 
-def _strip_think(text: str) -> str:
-    """Remove <think>...</think> reasoning blocks from LLM output."""
-    return _THINK_RE.sub("", text).strip()
+
+def _clean_for_voice(text: str) -> str:
+    """Clean LLM output for voice: strip thinking blocks and emojis."""
+    text = _THINK_RE.sub("", text)
+    text = _EMOJI_RE.sub("", text)
+    return text.strip()
 
 
 import random
@@ -951,7 +970,7 @@ class RealtimeSession:
                     in_tool_call = False
 
             # --- No tool calls: emit final response (text or audio) ---
-            collected_text = _strip_think(collected_text)
+            collected_text = _clean_for_voice(collected_text)
             if not collected_tool_calls:
                 if collected_text:
                     logger.info(
