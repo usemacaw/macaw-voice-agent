@@ -130,6 +130,7 @@ _KNOWN_TTS_MODULES = {
     "qwen": "tts.providers.qwen_tts",
     "kokoro": "tts.providers.kokoro_tts",
     "faster": "tts.providers.faster_tts",
+    "macaw-streaming": "tts.providers.macaw_streaming_tts",
 }
 
 

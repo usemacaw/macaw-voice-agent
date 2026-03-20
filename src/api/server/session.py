@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import websockets.exceptions
 
 from audio.codec import API_SAMPLE_RATE, INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH, decode_audio_from_client
-from config import LLM
+from config import LLM, STREAMING
 from protocol import events
 from protocol.contract import MAX_EVENTS_PER_SECOND, SESSION_IDLE_TIMEOUT_S
 from protocol.event_emitter import EventEmitter, SlowClientError
@@ -95,6 +95,11 @@ class RealtimeSession:
         self._response_task: asyncio.Task | None = None
         self._active_response_id: str | None = None
 
+        # Early LLM trigger state (E2E streaming)
+        self._early_trigger_active = False
+        self._previous_partial: str = ""
+        self._early_trigger_item_id: str | None = None
+
         # Audio input handler (VAD + ASR)
         self._audio_input = AudioInputHandler(
             asr=asr,
@@ -103,6 +108,11 @@ class RealtimeSession:
                 cancel_active_response=self._cancel_active_response,
                 append_user_item_and_respond=self._on_user_speech_complete,
                 emit=self._emitter.emit,
+                on_partial_transcript=(
+                    self._on_partial_transcript
+                    if STREAMING.enable_early_llm_trigger
+                    else None
+                ),
             ),
             emitter=self._emitter,
             session_id=self.session_id,
@@ -171,7 +181,94 @@ class RealtimeSession:
         # Auto-create response if configured
         td = self._config.turn_detection
         if td and td.create_response:
-            await self._start_response()
+            # If early trigger already started a response, don't start another
+            if not self._early_trigger_active:
+                await self._start_response()
+            else:
+                # Update the in-progress item with final transcript
+                async with self._store.lock:
+                    existing = self._store.get(item.id)
+                    if existing:
+                        existing.content = item.content
+                        existing.status = "completed"
+                logger.info(
+                    f"[{self.session_id[:8]}] Final transcript confirms early trigger: "
+                    f'"{transcript[:60]}"'
+                )
+                self._early_trigger_active = False
+
+    async def _on_partial_transcript(self, item_id: str, partial: str) -> None:
+        """Handle partial ASR transcript — may trigger early LLM response.
+
+        Called during speech when ASR emits a partial transcript.
+        Triggers LLM when enough stable words are detected.
+        """
+        if self._early_trigger_active:
+            return  # Already triggered
+
+        if not partial.strip():
+            return
+
+        # Count stable words (present in both current and previous partial)
+        stable_count = self._count_stable_words(partial, self._previous_partial)
+        self._previous_partial = partial
+
+        if stable_count < STREAMING.min_stable_words:
+            return
+
+        # Trigger early LLM response
+        logger.info(
+            f"[{self.session_id[:8]}] Early LLM trigger: {stable_count} stable words: "
+            f'"{partial[:60]}"'
+        )
+        self._early_trigger_active = True
+        self._early_trigger_item_id = item_id
+
+        # Create in-progress conversation item
+        item = ConversationItem(
+            id=item_id,
+            type="message",
+            role="user",
+            content=[ContentPart(type="input_audio", transcript=partial)],
+            status="in_progress",
+        )
+
+        async with self._store.lock:
+            prev_id = self._store.last_id()
+            self._store.append(item)
+
+        await self._emitter.emit(
+            events.input_audio_buffer_committed("", prev_id, item.id)
+        )
+        await self._emitter.emit(
+            events.conversation_item_created("", prev_id, item)
+        )
+
+        self._response_metrics["early_trigger_words"] = stable_count
+        self._response_metrics["early_trigger_partial"] = partial[:80]
+        await self._start_response()
+
+    @staticmethod
+    def _count_stable_words(current: str, previous: str) -> int:
+        """Count words that are stable between two consecutive partials.
+
+        A word is stable if it appears at the same position in both partials.
+        Returns the count of matching prefix words.
+        """
+        if not previous:
+            return 0
+
+        current_words = current.strip().lower().split()
+        previous_words = previous.strip().lower().split()
+
+        stable = 0
+        for cw, pw in zip(current_words, previous_words):
+            if cw == pw:
+                stable += 1
+            else:
+                break
+
+        return stable
 
     def _check_rate_limit(self) -> bool:
         """Check if client is sending events too fast. Returns True if allowed."""

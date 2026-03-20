@@ -39,12 +39,31 @@ class ASRProvider(ABC):
         """Feed audio chunk, return partial transcript."""
         raise NotImplementedError("Streaming not supported by this provider")
 
+    async def feed_chunk_with_partial(self, audio: bytes, stream_id: str) -> str | None:
+        """Feed audio chunk and return partial transcript if available.
+
+        Returns None if no new partial is available yet, or the updated
+        partial text. Called every ~100ms with new audio during speech.
+
+        Override this for true streaming ASR with incremental partial results.
+        Default implementation delegates to feed_chunk() for backward compat.
+        """
+        if self.supports_streaming:
+            result = await self.feed_chunk(audio, stream_id)
+            return result if result else None
+        return None
+
     async def finish_stream(self, stream_id: str) -> str:
         """Finish streaming session, return final transcript."""
         raise NotImplementedError("Streaming not supported by this provider")
 
     @property
     def supports_streaming(self) -> bool:
+        return False
+
+    @property
+    def supports_partial_results(self) -> bool:
+        """True if provider can emit partial transcripts during speech."""
         return False
 
     async def connect(self) -> None:

@@ -36,9 +36,10 @@ async def generate_sentences(
     Uses eager-first logic: yields first sentence at clause boundaries
     to minimize latency, then sentence-end boundaries for rest.
     """
+    from config import STREAMING
     buffer = ""
     first_sentence = True
-    min_eager_chars = 20
+    min_eager_chars = STREAMING.min_eager_chars
 
     async for chunk in llm.generate_stream(
         messages, system=system, tools=tools,

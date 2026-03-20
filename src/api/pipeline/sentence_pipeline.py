@@ -144,12 +144,10 @@ class SentencePipeline:
                     self._metrics.sentences_generated += 1
 
                 audio = item.audio
-                first_sub_chunk = True
-                for i in range(0, len(audio), _CHUNK_SIZE_BYTES):
-                    chunk = audio[i:i + _CHUNK_SIZE_BYTES]
-                    if not chunk:
-                        continue
 
+                # When TTS supports true streaming, chunks are already
+                # the right size (~83ms per frame). Skip re-chunking.
+                if self._tts.supports_streaming:
                     if first_audio_time is None:
                         first_audio_time = time.perf_counter()
                         self._metrics.first_audio_latency_ms = (
@@ -158,12 +156,29 @@ class SentencePipeline:
                         logger.info(
                             f"First audio in {self._metrics.first_audio_latency_ms:.0f}ms"
                         )
-
                     self._metrics.audio_chunks_produced += 1
-                    # is_new_sentence only on the very first sub-chunk of a new _AudioItem
-                    is_new = item.new_sentence and first_sub_chunk
-                    yield item.sentence, chunk, is_new
-                    first_sub_chunk = False
+                    yield item.sentence, audio, item.new_sentence
+                else:
+                    # Fallback: re-chunk into ~100ms pieces
+                    first_sub_chunk = True
+                    for i in range(0, len(audio), _CHUNK_SIZE_BYTES):
+                        chunk = audio[i:i + _CHUNK_SIZE_BYTES]
+                        if not chunk:
+                            continue
+
+                        if first_audio_time is None:
+                            first_audio_time = time.perf_counter()
+                            self._metrics.first_audio_latency_ms = (
+                                (first_audio_time - start_time) * 1000
+                            )
+                            logger.info(
+                                f"First audio in {self._metrics.first_audio_latency_ms:.0f}ms"
+                            )
+
+                        self._metrics.audio_chunks_produced += 1
+                        is_new = item.new_sentence and first_sub_chunk
+                        yield item.sentence, chunk, is_new
+                        first_sub_chunk = False
 
         finally:
             for task in (producer_task, tts_worker_task):

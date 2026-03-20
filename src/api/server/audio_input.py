@@ -38,6 +38,7 @@ class AudioInputCallbacks:
     cancel_active_response: Callable[[], Awaitable[bool]]  # returns True if cancelled
     append_user_item_and_respond: Callable[[ConversationItem, str], Awaitable[None]]
     emit: Callable[[dict], Awaitable[None]]
+    on_partial_transcript: Callable[[str, str], Awaitable[None]] | None = None  # (item_id, partial)
 
 
 class AudioInputHandler:
@@ -77,6 +78,11 @@ class AudioInputHandler:
         # ASR streaming
         self._asr_stream_id: str | None = None
         self._asr_lock = asyncio.Lock()
+
+        # Partial transcript state (E2E streaming)
+        self._last_partial: str = ""
+        self._last_partial_time: float = 0.0
+        self._partial_count: int = 0
 
         # Metrics
         self._speech_stopped_at: float | None = None
@@ -127,8 +133,36 @@ class AudioInputHandler:
             self._vad.feed(pcm)
 
     async def feed_asr_chunk(self, pcm: bytes) -> None:
-        """Feed PCM audio to ASR streaming (if active)."""
-        if self._asr_stream_id and self._asr.supports_streaming:
+        """Feed PCM audio to ASR streaming (if active).
+
+        When the ASR supports partial results, emits partial transcripts
+        during speech for E2E streaming (early LLM trigger).
+        """
+        if not self._asr_stream_id or not self._asr.supports_streaming:
+            return
+
+        if self._asr.supports_partial_results:
+            partial = await self._asr.feed_chunk_with_partial(pcm, self._asr_stream_id)
+            if partial and partial != self._last_partial:
+                now = time.perf_counter()
+                # Rate limit partials
+                from config import STREAMING
+                min_interval = STREAMING.partial_interval_ms / 1000
+                if now - self._last_partial_time >= min_interval:
+                    self._last_partial = partial
+                    self._last_partial_time = now
+                    self._partial_count += 1
+
+                    # Emit partial transcript event
+                    item_id = self._pending_speech_item_id or ""
+                    await self._emitter.emit(
+                        events.input_audio_transcription_delta("", item_id, 0, partial)
+                    )
+
+                    # Notify session for early LLM trigger
+                    if self._callbacks.on_partial_transcript:
+                        await self._callbacks.on_partial_transcript(item_id, partial)
+        else:
             await self._asr.feed_chunk(pcm, self._asr_stream_id)
 
     async def cleanup(self) -> None:
@@ -164,6 +198,10 @@ class AudioInputHandler:
         self._pending_speech_item_id = item_id
         # Set stream_id synchronously so feed_chunk works immediately
         self._asr_stream_id = item_id if self._asr.supports_streaming else None
+        # Reset partial state for new utterance
+        self._last_partial = ""
+        self._last_partial_time = 0.0
+        self._partial_count = 0
         logger.info(
             f"[{self._session_id[:8]}] VAD speech_started at {audio_start_ms}ms, "
             f"item={item_id[:12]}"
@@ -223,6 +261,9 @@ class AudioInputHandler:
 
         self._speech_stopped_at = time.perf_counter()
         self._response_metrics["speech_rms"] = round(rms, 1)
+        self._response_metrics["asr_partial_count"] = self._partial_count
+        if self._last_partial:
+            self._response_metrics["asr_last_partial"] = self._last_partial[:80]
 
         # Capture turn detection metrics from VAD (silence wait, Smart Turn timing)
         if self._vad and self._vad.last_turn_metrics:

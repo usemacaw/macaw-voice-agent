@@ -136,6 +136,17 @@ def conversation_item_truncated(event_id: str, item_id: str, content_index: int,
     )
 
 
+def input_audio_transcription_delta(event_id: str, item_id: str, content_index: int, delta: str) -> dict:
+    """Partial transcript update during speech (E2E streaming)."""
+    return _server_event(
+        "conversation.item.input_audio_transcription.delta",
+        event_id=event_id,
+        item_id=item_id,
+        content_index=content_index,
+        delta=delta,
+    )
+
+
 def input_audio_transcription_completed(event_id: str, item_id: str, content_index: int, transcript: str) -> dict:
     return _server_event(
         "conversation.item.input_audio_transcription.completed",

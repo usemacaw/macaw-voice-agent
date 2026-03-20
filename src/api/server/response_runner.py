@@ -262,7 +262,10 @@ class ResponseRunner:
             round_max_tokens = max_tokens if allow_tools else min(max_tokens, 40)
 
             # Final round (no tools) + audio: use pipelined LLM->TTS
-            if not allow_tools and plan.has_audio:
+            # Also use pipelined path on round 0 when no tools are registered,
+            # to avoid collecting full LLM text before TTS starts (batch anti-pattern).
+            use_pipelined = not allow_tools or (tool_round == 0 and not plan.tools)
+            if use_pipelined and plan.has_audio:
                 logger.info(
                     f"[{self._sid[:8]}] LLM call round {tool_round}: "
                     f"msgs={len(messages)}, tools=no (pipelined)"
@@ -324,6 +327,7 @@ class ResponseRunner:
                         f"{collected_text[:200]!r}"
                     )
                     if plan.has_audio:
+                        # Use streaming TTS (synthesize_stream) for real-time audio
                         await self._emit_tool_response_audio(
                             response_id, output_index, response_start,
                             collected_text,
@@ -438,36 +442,23 @@ class ResponseRunner:
         first_audio_sent = False
 
         logger.info(
-            f"[{self._sid[:8]}] TTS direct synth: {full_transcript[:100]!r}"
+            f"[{self._sid[:8]}] TTS streaming synth: {full_transcript[:100]!r}"
         )
-        if self._tts.supports_streaming:
-            async for audio_chunk in self._tts.synthesize_stream(full_transcript):
-                if not audio_chunk:
-                    continue
-                audio_b64 = encode_audio_for_client(
-                    audio_chunk, self._config.output_audio_format
+        # Always use streaming TTS — emit audio chunks as they're generated
+        async for audio_chunk in self._tts.synthesize_stream(full_transcript):
+            if not audio_chunk:
+                continue
+            audio_b64 = encode_audio_for_client(
+                audio_chunk, self._config.output_audio_format
+            )
+            await self._emitter.emit(
+                events.response_audio_delta(
+                    "", response_id, item_id, output_index, content_index,
+                    audio_b64,
                 )
-                await self._emitter.emit(
-                    events.response_audio_delta(
-                        "", response_id, item_id, output_index, content_index,
-                        audio_b64,
-                    )
-                )
-                if not first_audio_sent:
-                    first_audio_sent = True
-                    self._record_e2e_latency()
-        else:
-            audio = await self._tts.synthesize(full_transcript)
-            if audio:
-                audio_b64 = encode_audio_for_client(
-                    audio, self._config.output_audio_format
-                )
-                await self._emitter.emit(
-                    events.response_audio_delta(
-                        "", response_id, item_id, output_index, content_index,
-                        audio_b64,
-                    )
-                )
+            )
+            if not first_audio_sent:
+                first_audio_sent = True
                 self._record_e2e_latency()
 
         if full_transcript:

@@ -104,6 +104,15 @@ SLO_CONFIG = {
     "first_audio_tool_ms": _env_float("SLO_FIRST_AUDIO_TOOL_MS", 5000.0, 500.0, 60000.0),
 }
 
+STREAMING_CONFIG = {
+    "enable_early_llm_trigger": os.getenv("STREAMING_EARLY_LLM_TRIGGER", "false").lower() == "true",
+    "min_stable_words": _env_int("STREAMING_MIN_STABLE_WORDS", 3, 1, 20),
+    "partial_interval_ms": _env_int("STREAMING_PARTIAL_INTERVAL_MS", 300, 50, 2000),
+    "max_partials_per_second": _env_int("STREAMING_MAX_PARTIALS_PER_SEC", 5, 1, 20),
+    "correction_threshold": _env_float("STREAMING_CORRECTION_THRESHOLD", 0.5, 0.1, 1.0),
+    "min_eager_chars": _env_int("STREAMING_MIN_EAGER_CHARS", 10, 5, 50),
+}
+
 TOOL_CONFIG = {
     "enable_mock_tools": os.getenv("TOOL_ENABLE_MOCK", "false").lower() == "true",
     "enable_web_search": os.getenv("TOOL_ENABLE_WEB_SEARCH", "false").lower() == "true",
@@ -190,6 +199,17 @@ class ToolPolicy:
     default_filler: str
 
 
+@dataclass(frozen=True)
+class StreamingPolicy:
+    """E2E streaming pipeline configuration."""
+    enable_early_llm_trigger: bool
+    min_stable_words: int
+    partial_interval_ms: int
+    max_partials_per_second: int
+    correction_threshold: float
+    min_eager_chars: int
+
+
 # Instantiate from the dicts loaded above
 VAD = VadPolicy(**VAD_CONFIG)
 PIPELINE = PipelinePolicy(**PIPELINE_CONFIG)
@@ -198,3 +218,4 @@ CONNECTION = ConnectionPolicy(**WS_CONFIG)
 CONTEXT = ContextPolicy(**CONTEXT_CONFIG)
 SLO = SLOPolicy(**SLO_CONFIG)
 TOOL = ToolPolicy(**TOOL_CONFIG)
+STREAMING = StreamingPolicy(**STREAMING_CONFIG)

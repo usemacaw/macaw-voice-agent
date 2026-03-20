@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macaw-qwen3-tts-streaming"
+version = "0.1.0"
+description = "True streaming TTS for Qwen3-TTS with CUDA graphs, two-phase latency, and Hann crossfade"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.5.1",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "transformers>=4.45",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+include = ["macaw_tts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
