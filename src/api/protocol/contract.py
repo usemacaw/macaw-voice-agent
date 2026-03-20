@@ -82,7 +82,7 @@ Protocol Ordering Guarantees:
 # ============================================================================
 
 # Rate limiting
-MAX_EVENTS_PER_SECOND = 200
+MAX_EVENTS_PER_SECOND = 500
 
 # Session timeouts
 SESSION_IDLE_TIMEOUT_S = 600.0  # 10 minutes
