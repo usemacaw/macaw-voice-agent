@@ -216,7 +216,7 @@ class ResponseRunner:
         output_index = 0
 
         tool_engine = None
-        if plan.server_side_tools and self._tool_registry:
+        if self._tool_registry:
             tool_engine = ToolExecutionEngine(
                 session_id=self._sid,
                 emitter=self._emitter,
@@ -315,10 +315,6 @@ class ResponseRunner:
                     await tool_engine.emit_tool_calls_for_client(
                         response_id, output_index, collected_tool_calls,
                         self._ctx.state_lock, self._ctx.append_item,
-                    )
-                else:
-                    await self._emit_tool_calls_for_client_legacy(
-                        response_id, output_index, collected_tool_calls,
                     )
                 break
         else:
@@ -560,45 +556,6 @@ class ResponseRunner:
                 "", response_id, output_index, text_item
             )
         )
-
-    async def _emit_tool_calls_for_client_legacy(
-        self,
-        response_id: str,
-        output_index: int,
-        tool_calls: list[dict],
-    ) -> None:
-        """Emit tool call events for client-side execution (no ToolEngine)."""
-        for tc in tool_calls:
-            tc_id = tc["id"] or f"call_{uuid.uuid4().hex[:12]}"
-            fc_item_id = f"item_{uuid.uuid4().hex[:24]}"
-            fc_item = ConversationItem(
-                id=fc_item_id,
-                type="function_call",
-                status="completed",
-                call_id=tc_id,
-                name=tc["name"],
-                arguments=tc["arguments"],
-            )
-            await self._emitter.emit(
-                events.response_output_item_added(
-                    "", response_id, output_index, fc_item
-                )
-            )
-            async with self._ctx.state_lock:
-                self._ctx.append_item(fc_item)
-
-            await self._emitter.emit(
-                events.response_function_call_arguments_done(
-                    "", response_id, fc_item_id, output_index,
-                    tc_id, tc["arguments"],
-                )
-            )
-            await self._emitter.emit(
-                events.response_output_item_done(
-                    "", response_id, output_index, fc_item
-                )
-            )
-            output_index += 1
 
     # ------------------------------------------------------------------
     # Non-tool response helpers

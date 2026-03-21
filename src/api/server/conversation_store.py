@@ -11,13 +11,11 @@ import asyncio
 from collections import deque
 from typing import TYPE_CHECKING
 
+from protocol.contract import MAX_CONVERSATION_ITEMS
 from tools.recall_memory import ConversationMemory
 
 if TYPE_CHECKING:
     from protocol.models import ConversationItem
-
-# Maximum conversation items kept in memory (FIFO eviction of oldest)
-MAX_CONVERSATION_ITEMS = 200
 
 
 class ConversationStore:

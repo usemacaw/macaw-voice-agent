@@ -22,9 +22,13 @@ from protocol.models import ContentPart, ConversationItem
 from server.filler import build_dynamic_filler, send_filler_audio
 
 if TYPE_CHECKING:
+    import asyncio
+    from collections.abc import Callable
+
     from protocol.event_emitter import EventEmitter
-    from protocol.models import SessionConfig
+    from protocol.models import ConversationItem, SessionConfig
     from providers.llm import LLMProvider, LLMStreamEvent
+    from providers.tts import TTSProvider
     from tools.registry import ToolRegistry
 
 
@@ -56,7 +60,7 @@ class ToolExecutionEngine:
         self,
         session_id: str,
         emitter: EventEmitter,
-        tts: object,  # TTSProvider
+        tts: TTSProvider,
         config: SessionConfig,
         tool_registry: ToolRegistry,
     ):
@@ -116,8 +120,8 @@ class ToolExecutionEngine:
         output_index: int,
         tool_calls: list[dict],
         has_audio: bool,
-        ctx_lock: object,  # asyncio.Lock
-        append_item: object,  # Callable
+        ctx_lock: asyncio.Lock,
+        append_item: Callable[[ConversationItem], None],
     ) -> ToolRoundResult:
         """Execute tool calls server-side with filler TTS.
 
@@ -226,8 +230,8 @@ class ToolExecutionEngine:
         response_id: str,
         output_index: int,
         tool_calls: list[dict],
-        ctx_lock: object,
-        append_item: object,
+        ctx_lock: asyncio.Lock,
+        append_item: Callable[[ConversationItem], None],
     ) -> None:
         """Emit tool call events for client-side execution (fallback mode)."""
         for tc in tool_calls:

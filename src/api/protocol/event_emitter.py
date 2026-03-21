@@ -20,19 +20,12 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from websockets.asyncio.server import ServerConnection
 
+from protocol.contract import DROPPABLE_EVENTS
+
 logger = logging.getLogger("open-voice-api.event-emitter")
 
 
 _SEND_TIMEOUT_S = 5.0
-
-# Events that can be dropped on slow clients without causing state divergence.
-# All other events are structural and MUST be delivered or the connection is closed.
-_DROPPABLE_EVENTS = frozenset({
-    "response.audio.delta",
-    "response.audio_transcript.delta",
-    "response.text.delta",
-    "response.function_call_arguments.delta",
-})
 
 # Transcript deltas are first to be throttled under pressure
 _THROTTLEABLE_EVENTS = frozenset({
@@ -162,7 +155,7 @@ class EventEmitter:
             self._consecutive_drops = 0
             self._update_pressure_level()
         except asyncio.TimeoutError:
-            if event_type in _DROPPABLE_EVENTS:
+            if event_type in DROPPABLE_EVENTS:
                 self._consecutive_drops += 1
                 self._total_drops += 1
                 self._update_pressure_level()

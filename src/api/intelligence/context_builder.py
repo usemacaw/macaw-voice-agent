@@ -92,23 +92,3 @@ class ContextBuilder:
             window_fallback=CONTEXT.window_fallback,
         )
 
-    def merge_tool_schemas(
-        self,
-        config_tools: list[dict] | None,
-        server_schemas: list[dict],
-    ) -> list[dict]:
-        """Merge session config tools with server-side tool schemas.
-
-        Avoids duplicates by name.
-        """
-        tools = list(config_tools) if config_tools else []
-        existing_names = {
-            t.get("function", {}).get("name")
-            for t in tools
-            if isinstance(t, dict)
-        }
-        for schema in server_schemas:
-            name = schema.get("function", {}).get("name", "")
-            if name not in existing_names:
-                tools.append(schema)
-        return tools

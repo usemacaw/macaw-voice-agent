@@ -36,7 +36,7 @@ from protocol.models import (
     SessionConfigValidationError,
 )
 from server.audio_input import AudioInputCallbacks, AudioInputHandler
-from server.conversation_store import ConversationStore, MAX_CONVERSATION_ITEMS
+from server.conversation_store import ConversationStore
 from server.response_runner import ResponseContext, ResponseRunner
 from server.system_metrics import SYSTEM_METRICS
 
@@ -187,7 +187,7 @@ class RealtimeSession:
             else:
                 # Update the in-progress item with final transcript
                 async with self._store.lock:
-                    existing = self._store.get(item.id)
+                    existing = self._store.find(item.id)
                     if existing:
                         existing.content = item.content
                         existing.status = "completed"
