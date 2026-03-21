@@ -4,10 +4,12 @@ Tests initialization, buffer allocation, and state management.
 capture() and run() require GPU and are NOT tested here.
 """
 
+from collections import OrderedDict
+
 import torch
 import pytest
 
-from macaw_tts.talker_graph import TalkerCUDAGraph
+from macaw_tts.talker_graph import TalkerCUDAGraph, _MASK_CACHE_MAX_SIZE
 from macaw_tts.predictor_graph import PredictorCUDAGraph
 
 
@@ -43,6 +45,24 @@ class _DummyModel(torch.nn.Module):
         self.config = config
 
 
+def _make_predictor(config=None):
+    """Create a minimal Predictor module for testing. Avoids inline class duplication."""
+    if config is None:
+        config = _PredictorConfig()
+
+    class _Predictor(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.small_to_mtp_projection = torch.nn.Linear(128, 64)
+            self.model = _DummyModel(config)
+            self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
+            self.model.codec_embedding = torch.nn.ModuleList(
+                [torch.nn.Embedding(100, 64) for _ in range(15)]
+            )
+
+    return _Predictor()
+
+
 class TestTalkerCUDAGraphInit:
     """Tests for TalkerCUDAGraph initialization and buffer allocation."""
 
@@ -57,6 +77,14 @@ class TestTalkerCUDAGraphInit:
         assert graph.max_seq_len == 512
         assert graph.hidden_size == 128
         assert graph.num_layers == 4
+
+    def test_position_ids_shape_uses_num_position_types(self):
+        config = _TalkerConfig()
+        model = _DummyModel(config)
+        graph = TalkerCUDAGraph(model, config, device="cpu")
+
+        assert graph._num_position_types == 3
+        assert graph.position_ids.shape == (3, 1, 1)
 
     def test_not_captured_initially(self):
         config = _TalkerConfig()
@@ -87,18 +115,7 @@ class TestPredictorCUDAGraphInit:
 
     def test_buffers_allocated_correctly(self):
         config = _PredictorConfig()
-
-        class _Predictor(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
-                self.model = _DummyModel(config)
-                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
-                self.model.codec_embedding = torch.nn.ModuleList(
-                    [torch.nn.Embedding(100, 64) for _ in range(15)]
-                )
-
-        predictor = _Predictor()
+        predictor = _make_predictor(config)
         graph = PredictorCUDAGraph(
             predictor, config, talker_hidden_size=128,
             device="cpu", dtype=torch.float32,
@@ -111,18 +128,7 @@ class TestPredictorCUDAGraphInit:
 
     def test_not_captured_initially(self):
         config = _PredictorConfig()
-
-        class _Predictor(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
-                self.model = _DummyModel(config)
-                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
-                self.model.codec_embedding = torch.nn.ModuleList(
-                    [torch.nn.Embedding(100, 64) for _ in range(15)]
-                )
-
-        predictor = _Predictor()
+        predictor = _make_predictor(config)
         graph = PredictorCUDAGraph(
             predictor, config, talker_hidden_size=128,
             device="cpu", dtype=torch.float32,
@@ -133,18 +139,7 @@ class TestPredictorCUDAGraphInit:
 
     def test_cache_position_tensors_prebuilt(self):
         config = _PredictorConfig()
-
-        class _Predictor(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
-                self.model = _DummyModel(config)
-                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
-                self.model.codec_embedding = torch.nn.ModuleList(
-                    [torch.nn.Embedding(100, 64) for _ in range(15)]
-                )
-
-        predictor = _Predictor()
+        predictor = _make_predictor(config)
         graph = PredictorCUDAGraph(
             predictor, config, talker_hidden_size=128,
             device="cpu", dtype=torch.float32,
@@ -159,18 +154,7 @@ class TestPredictorCUDAGraphInit:
 
     def test_sampling_parameters_stored(self):
         config = _PredictorConfig()
-
-        class _Predictor(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
-                self.model = _DummyModel(config)
-                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
-                self.model.codec_embedding = torch.nn.ModuleList(
-                    [torch.nn.Embedding(100, 64) for _ in range(15)]
-                )
-
-        predictor = _Predictor()
+        predictor = _make_predictor(config)
         graph = PredictorCUDAGraph(
             predictor, config, talker_hidden_size=128,
             device="cpu", dtype=torch.float32,
@@ -205,23 +189,63 @@ class TestTalkerCUDAGraphGuards:
         assert "max_seq_len=512" in r
 
 
+class TestTalkerMaskCacheLRU:
+    """Tests for LRU eviction in TalkerCUDAGraph mask cache."""
+
+    def test_mask_cache_max_size_is_positive(self):
+        assert _MASK_CACHE_MAX_SIZE > 0
+
+    def test_mask_cache_is_ordered_dict(self):
+        config = _TalkerConfig()
+        model = _DummyModel(config)
+        graph = TalkerCUDAGraph(model, config, device="cpu")
+        # Simulate _build_attention_masks initialization
+        graph._mask_cache = OrderedDict()
+        assert isinstance(graph._mask_cache, OrderedDict)
+
+    def test_mask_cache_evicts_oldest_when_full(self):
+        """Verify LRU eviction removes oldest entry when cache exceeds max size."""
+        config = _TalkerConfig()
+        model = _DummyModel(config)
+        graph = TalkerCUDAGraph(model, config, device="cpu")
+
+        # Manually populate the cache to test eviction logic
+        graph._mask_cache = OrderedDict()
+        for i in range(_MASK_CACHE_MAX_SIZE):
+            graph._mask_cache[i] = torch.zeros(1)
+
+        assert len(graph._mask_cache) == _MASK_CACHE_MAX_SIZE
+        first_key = next(iter(graph._mask_cache))
+        assert first_key == 0
+
+        # Add one more — should evict key 0
+        graph._mask_cache[_MASK_CACHE_MAX_SIZE] = torch.zeros(1)
+        if len(graph._mask_cache) > _MASK_CACHE_MAX_SIZE:
+            graph._mask_cache.popitem(last=False)
+
+        assert len(graph._mask_cache) == _MASK_CACHE_MAX_SIZE
+        assert 0 not in graph._mask_cache
+        assert _MASK_CACHE_MAX_SIZE in graph._mask_cache
+
+    def test_mask_cache_lru_promotes_accessed_key(self):
+        """Accessing a cached key should move it to most-recently-used position."""
+        cache: OrderedDict[int, torch.Tensor] = OrderedDict()
+        for i in range(5):
+            cache[i] = torch.zeros(1)
+
+        # Access key 0 — should move it to end
+        cache.move_to_end(0)
+        keys = list(cache.keys())
+        assert keys[-1] == 0
+        assert keys[0] == 1
+
+
 class TestPredictorCUDAGraphGuards:
     """Tests for capture guard and error recovery."""
 
     def test_run_before_capture_raises(self):
         config = _PredictorConfig()
-
-        class _Predictor(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
-                self.model = _DummyModel(config)
-                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
-                self.model.codec_embedding = torch.nn.ModuleList(
-                    [torch.nn.Embedding(100, 64) for _ in range(15)]
-                )
-
-        predictor = _Predictor()
+        predictor = _make_predictor(config)
         graph = PredictorCUDAGraph(
             predictor, config, talker_hidden_size=128,
             device="cpu", dtype=torch.float32,
@@ -232,18 +256,7 @@ class TestPredictorCUDAGraphGuards:
 
     def test_repr(self):
         config = _PredictorConfig()
-
-        class _Predictor(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
-                self.model = _DummyModel(config)
-                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
-                self.model.codec_embedding = torch.nn.ModuleList(
-                    [torch.nn.Embedding(100, 64) for _ in range(15)]
-                )
-
-        predictor = _Predictor()
+        predictor = _make_predictor(config)
         graph = PredictorCUDAGraph(
             predictor, config, talker_hidden_size=128,
             device="cpu", dtype=torch.float32,

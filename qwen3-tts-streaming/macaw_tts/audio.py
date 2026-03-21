@@ -5,7 +5,10 @@ Handles resampling (24kHz → 8kHz) and format conversion (float32 ↔ PCM16).
 
 from __future__ import annotations
 
+from math import gcd
+
 import numpy as np
+from scipy.signal import resample_poly as _resample_poly
 
 
 # Qwen3-TTS 12Hz codec output rate
@@ -38,19 +41,18 @@ def resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     if len(audio) == 0:
         return audio
 
-    from math import gcd
-
     g = gcd(src_rate, dst_rate)
     up = dst_rate // g
     down = src_rate // g
 
-    from scipy.signal import resample_poly
-
-    return resample_poly(audio, up, down).astype(np.float32)
+    return _resample_poly(audio, up, down).astype(np.float32)
 
 
 def float32_to_pcm16(audio: np.ndarray) -> bytes:
     """Convert float32 [-1, 1] audio to PCM 16-bit little-endian bytes.
+
+    Uses symmetric scaling via 32768 with clipping to int16 range.
+    This matches pcm16_to_float32() for minimal roundtrip error.
 
     Args:
         audio: Float32 audio array.
@@ -59,7 +61,9 @@ def float32_to_pcm16(audio: np.ndarray) -> bytes:
         PCM16 LE bytes.
     """
     clipped = np.clip(audio, -1.0, 1.0)
-    pcm = (clipped * 32767).astype(np.int16)
+    # Scale by 32768 (symmetric with decode) and clip to int16 range.
+    # 1.0 * 32768 = 32768 → clipped to 32767; -1.0 * 32768 = -32768 → exact.
+    pcm = np.clip(clipped * 32768, -32768, 32767).astype(np.int16)
     return pcm.tobytes()
 
 

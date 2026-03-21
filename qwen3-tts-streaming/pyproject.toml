@@ -13,6 +13,20 @@ dependencies = [
     "torch>=2.5.1",
     "numpy>=1.24",
     "scipy>=1.10",
+    # PINNED: we depend on transformers internal APIs that change without warning:
+    #   - transformers.masking_utils.create_causal_mask (talker_graph.py)
+    #   - transformers.masking_utils.create_sliding_window_causal_mask (talker_graph.py, predictor_graph.py)
+    #   - transformers.StaticCache (talker_graph.py, predictor_graph.py)
+    #
+    # UPGRADE CHECKLIST (when bumping upper bound):
+    #   1. grep -rn 'from transformers' macaw_tts/ → verify all imports still exist
+    #   2. Check StaticCache.reset() still zeros KV tensors in-place
+    #   3. Check create_causal_mask signature: (config, input_embeds, attention_mask, cache_position, past_key_values)
+    #   4. Run full GPU test suite (CUDA graph capture is sensitive to kernel changes)
+    #   5. Benchmark TTFA and RTF — torch.compile internals may change
+    #
+    # RISK: if Qwen3-TTS upstream requires transformers>=4.50, this pin will
+    # conflict. In that case, update the internal API usage first, then bump.
     "transformers>=4.45,<4.50",
 ]
 

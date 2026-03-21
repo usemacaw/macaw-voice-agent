@@ -9,17 +9,27 @@ as a CUDA graph for ~8ms/step (vs ~50ms without graphs).
 Strategy:
 - Prefill via HF forward (variable-length) → copies KV into StaticCache
 - Decode via CUDA graph replay (fixed-shape) → ~8ms/step
-- Lazy attention mask cache → O(1) per step after first computation
+- LRU attention mask cache → O(1) per step, bounded VRAM usage
 """
 
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import Optional
 
 import torch
+from transformers import StaticCache
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 logger = logging.getLogger("macaw-tts.talker-graph")
+
+# Maximum number of attention masks to cache. Each mask for a 2048 max_seq_len
+# model is ~16MB in bfloat16. 16 entries = ~256MB worst case.
+# Trade-off: lower = less VRAM, higher = fewer recomputations on long sequences.
+# At 16, a 2048-frame generation recomputes ~99% of masks (sequential access
+# pattern means each position is used exactly once, so LRU eviction is optimal).
+_MASK_CACHE_MAX_SIZE = 16
 
 
 class TalkerCUDAGraph:
@@ -58,9 +68,12 @@ class TalkerCUDAGraph:
         # Cache position buffer — updated before each graph replay
         self.cache_position = torch.zeros(1, dtype=torch.long, device=device)
 
-        # RoPE deltas and position IDs
+        # RoPE deltas and position IDs.
+        # num_position_types=3 is Qwen3-TTS specific: (text, codec, fused) positions.
+        # Derived from upstream Qwen3-TTS model which uses [3, B, seq_len] position_ids.
+        self._num_position_types = 3
         self.rope_deltas = torch.zeros(1, 1, dtype=torch.float32, device=device)
-        self.position_ids = torch.zeros(3, 1, 1, dtype=torch.float32, device=device)
+        self.position_ids = torch.zeros(self._num_position_types, 1, 1, dtype=torch.float32, device=device)
 
         # StaticCache and graph (initialized on capture)
         self.static_cache = None
@@ -77,8 +90,6 @@ class TalkerCUDAGraph:
 
     def _init_static_cache(self, config):
         """Create StaticCache and force lazy layer initialization."""
-        from transformers import StaticCache
-
         self.static_cache = StaticCache(config=config, max_cache_len=self.max_seq_len)
 
         num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
@@ -95,16 +106,15 @@ class TalkerCUDAGraph:
         positions (which consumed O(max_seq_len) GPU memory). Now uses a dict
         cache that only stores masks for positions actually used.
         """
-        from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
-
         self._mask_dummy = torch.zeros(1, 1, self.hidden_size, dtype=self.dtype, device=self.device)
+        self._mask_pos_buf = torch.zeros(1, dtype=torch.long, device=self.device)
         self._mask_fn = (
             create_sliding_window_causal_mask
             if getattr(self.model.config, "sliding_window", None) is not None
             else create_causal_mask
         )
         self._mask_attention_mask = attention_mask
-        self._mask_cache: dict[int, torch.Tensor] = {}
+        self._mask_cache: OrderedDict[int, torch.Tensor] = OrderedDict()
 
         # Pre-compute position 0 to initialize attn_mask buffer
         mask_0 = self._compute_mask(0)
@@ -114,18 +124,29 @@ class TalkerCUDAGraph:
             self.attn_mask.copy_(mask_0)
 
     def _compute_mask(self, position: int) -> torch.Tensor:
-        """Compute and cache attention mask for a given position."""
+        """Compute and cache attention mask for a given position.
+
+        Uses LRU eviction to bound VRAM usage at _MASK_CACHE_MAX_SIZE entries.
+        Without eviction, generating 2048 frames would cache 2048 masks,
+        consuming ~32GB VRAM and causing OOM.
+        """
         if position in self._mask_cache:
+            self._mask_cache.move_to_end(position)
             return self._mask_cache[position]
 
-        pos = torch.tensor([position], device=self.device)
+        # Reuse pre-allocated position buffer to avoid tensor allocation per call
+        self._mask_pos_buf[0] = position
         mask = self._mask_fn(
             config=self.model.config,
             input_embeds=self._mask_dummy,
             attention_mask=self._mask_attention_mask,
-            cache_position=pos,
+            cache_position=self._mask_pos_buf,
             past_key_values=self.static_cache,
         )
+
+        if len(self._mask_cache) >= _MASK_CACHE_MAX_SIZE:
+            self._mask_cache.popitem(last=False)
+
         self._mask_cache[position] = mask
         return mask
 
@@ -155,7 +176,7 @@ class TalkerCUDAGraph:
             prefill_len: Simulated prefill length for warmup.
             num_warmup: Number of warmup iterations before capture.
         """
-        logger.info(f"Warming up talker graph ({num_warmup} runs)...")
+        logger.info("talker_warmup num_warmup=%d", num_warmup)
 
         self._init_static_cache(self.model.config)
         self._build_attention_masks()
@@ -226,13 +247,17 @@ class TalkerCUDAGraph:
         if attention_mask is not None:
             pad_counts = (attention_mask == 0).sum(dim=-1)
             mask_key = tuple(pad_counts.tolist())
+            # Build full mask tensorially: arange < pad_counts → 0, else → 1
             full_attention_mask = torch.ones(
                 attention_mask.shape[0], self.max_seq_len,
                 dtype=attention_mask.dtype, device=attention_mask.device,
             )
-            for b, pads in enumerate(pad_counts.tolist()):
-                if pads > 0:
-                    full_attention_mask[b, :pads] = 0
+            positions = torch.arange(
+                self.max_seq_len, device=attention_mask.device,
+            ).unsqueeze(0)
+            full_attention_mask = (
+                positions >= pad_counts.unsqueeze(1)
+            ).to(attention_mask.dtype)
 
         if not hasattr(self, '_mask_cache') or mask_key != self._mask_key:
             self._build_attention_masks(full_attention_mask)
@@ -270,9 +295,8 @@ class TalkerCUDAGraph:
         self.attn_mask.copy_(self._get_attn_mask(position))
 
         delta = self.rope_deltas + self.cache_position[0].to(self.rope_deltas.dtype)
-        # position_ids has shape [3, 1, 1] — 3 position types for Qwen3-TTS RoPE
-        # (text position, codec position, fused position)
-        self.position_ids.copy_(delta.unsqueeze(0).expand(3, -1, -1))
+        # position_ids has shape [num_position_types, 1, 1] — expanded for RoPE
+        self.position_ids.copy_(delta.unsqueeze(0).expand(self._num_position_types, -1, -1))
 
         self.graph.replay()
         return self.output_buf

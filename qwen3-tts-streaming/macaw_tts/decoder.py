@@ -32,6 +32,11 @@ class StreamingDecoder:
         speech_tokenizer: Qwen3-TTS speech tokenizer (Code2Wav model).
         decode_window: Number of frames in decode context window (40 default).
         context_frames: Left context for sliding window quality (25 default).
+        pad_token_id: Codec token ID used for left-padding in compiled decode.
+            Using a semantically appropriate pad token (e.g., codec_pad_id)
+            instead of 0 prevents the decoder from interpreting padding frames
+            as valid codec token 0, which could cause audio artifacts via
+            convolutional bleed-through into non-padding frames.
     """
 
     def __init__(
@@ -39,10 +44,12 @@ class StreamingDecoder:
         speech_tokenizer,
         decode_window: int = 40,
         context_frames: int = 25,
+        pad_token_id: int = 0,
     ):
         self._tokenizer = speech_tokenizer
         self._decode_window = decode_window
         self._context_frames = context_frames
+        self._pad_token_id = pad_token_id
         self._compiled = False
         self._compiled_forward = None
 
@@ -63,7 +70,7 @@ class StreamingDecoder:
                 dynamic=False,
             )
             self._compiled = True
-            logger.info(f"Decoder compiled with mode={mode}")
+            logger.info("decoder_compiled mode=%s", mode)
         else:
             logger.warning("Speech tokenizer has no decoder attribute, skipping compile")
 
@@ -151,8 +158,13 @@ class StreamingDecoder:
         target = self._decode_window
 
         if T < target:
-            # Left-pad with zeros (clamp to valid range before decode)
-            pad = torch.zeros(B, target - T, Q, dtype=codes.dtype, device=codes.device)
+            # Left-pad with pad_token_id instead of zeros. Using a semantically
+            # correct pad token prevents the decoder from interpreting padding
+            # as valid codec token 0, reducing audio artifacts at chunk boundaries.
+            pad = torch.full(
+                (B, target - T, Q), self._pad_token_id,
+                dtype=codes.dtype, device=codes.device,
+            )
             codes_padded = torch.cat([pad, codes], dim=1)
         elif T > target:
             # Trim to window (keep right side)

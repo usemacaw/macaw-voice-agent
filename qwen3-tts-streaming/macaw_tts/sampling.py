@@ -99,7 +99,8 @@ class CircularRepetitionPenalty:
         self._history = torch.full(
             (1, window), vocab_size, dtype=torch.long, device=self.device
         )
-        self._step = 0
+        # Tensor step counter on device — avoids Python int → GPU sync on indexing
+        self._step = torch.zeros(1, dtype=torch.long, device=self.device)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply penalty to logits in-place. Returns modified logits."""
@@ -121,8 +122,8 @@ class CircularRepetitionPenalty:
         return torch.where(penalty_mask, penalized, logits)
 
     def update(self, token: torch.Tensor) -> None:
-        """Add token to circular buffer. Pure tensor op, no CPU↔GPU sync."""
-        pos = self._step % self.window
+        """Add token to circular buffer. Pure tensor ops, no CPU↔GPU sync."""
+        pos = self._step % self.window  # tensor modulo → stays on device
         t = token.view(-1)[0] if token.dim() > 0 else token
         self._history[0, pos] = t
         self._step += 1
@@ -130,4 +131,4 @@ class CircularRepetitionPenalty:
     def reset(self) -> None:
         """Clear history for new sequence."""
         self._history.fill_(self.vocab_size)
-        self._step = 0
+        self._step.zero_()

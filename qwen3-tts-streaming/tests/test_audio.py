@@ -84,7 +84,8 @@ class TestFloat32ToPcm16:
         audio = np.array([-1.0], dtype=np.float32)
         pcm = float32_to_pcm16(audio)
         samples = np.frombuffer(pcm, dtype=np.int16)
-        assert samples[0] == -32767
+        # -1.0 * 32768 = -32768, symmetric with pcm16_to_float32 divisor
+        assert samples[0] == -32768
 
     def test_clips_above_one(self):
         audio = np.array([2.0], dtype=np.float32)
@@ -127,10 +128,12 @@ class TestValidateAudioPath:
         with pytest.raises(ValueError, match="must be an audio file"):
             _validate_audio_path("/etc/passwd")
 
-    def test_rejects_python_file(self):
+    def test_rejects_python_file(self, tmp_path):
         from macaw_tts.model import _validate_audio_path
+        py_file = tmp_path / "evil.py"
+        py_file.write_bytes(b"print('hello')")
         with pytest.raises(ValueError, match="must be an audio file"):
-            _validate_audio_path("/tmp/evil.py")
+            _validate_audio_path(str(py_file))
 
     def test_rejects_nonexistent_audio_file(self):
         from macaw_tts.model import _validate_audio_path
@@ -148,3 +151,37 @@ class TestValidateAudioPath:
         flac_file = tmp_path / "test.flac"
         flac_file.write_bytes(b"\x00" * 100)
         _validate_audio_path(str(flac_file))  # should not raise
+
+    def test_rejects_proc_path(self):
+        from macaw_tts.model import _validate_audio_path
+        with pytest.raises(ValueError, match="blocked system directory"):
+            _validate_audio_path("/proc/self/cmdline")
+
+    def test_rejects_sys_path(self):
+        from macaw_tts.model import _validate_audio_path
+        with pytest.raises(ValueError, match="blocked system directory"):
+            _validate_audio_path("/sys/class/net")
+
+    def test_rejects_dev_path(self):
+        from macaw_tts.model import _validate_audio_path
+        with pytest.raises(ValueError, match="blocked system directory"):
+            _validate_audio_path("/dev/null")
+
+    def test_rejects_empty_file(self, tmp_path):
+        from macaw_tts.model import _validate_audio_path
+        empty_file = tmp_path / "empty.wav"
+        empty_file.write_bytes(b"")
+        with pytest.raises(ValueError, match="empty"):
+            _validate_audio_path(str(empty_file))
+
+    def test_rejects_oversized_file(self, tmp_path):
+        from macaw_tts.model import _validate_audio_path, _MAX_REF_AUDIO_SIZE
+        # Create a file that reports as too large via a size check
+        big_file = tmp_path / "huge.wav"
+        # Write just enough to test the size check
+        big_file.write_bytes(b"\x00" * 100)
+        # Patch os.path.getsize to return a large value
+        import unittest.mock
+        with unittest.mock.patch("os.path.getsize", return_value=_MAX_REF_AUDIO_SIZE + 1):
+            with pytest.raises(ValueError, match="too large"):
+                _validate_audio_path(str(big_file))

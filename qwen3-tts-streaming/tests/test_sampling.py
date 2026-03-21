@@ -142,3 +142,15 @@ class TestCircularRepetitionPenalty:
         logits = torch.ones(1, 5) * 4.0
         result = rp.apply(logits.clone())
         assert result[0, 3].item() == pytest.approx(2.0)
+
+    def test_step_counter_is_tensor(self):
+        """_step should be a tensor on device, not a Python int."""
+        rp = CircularRepetitionPenalty(window=4, penalty=2.0, vocab_size=5, device="cpu")
+        assert isinstance(rp._step, torch.Tensor)
+        assert rp._step.item() == 0
+
+        rp.update(torch.tensor(1))
+        assert rp._step.item() == 1
+
+        rp.reset()
+        assert rp._step.item() == 0

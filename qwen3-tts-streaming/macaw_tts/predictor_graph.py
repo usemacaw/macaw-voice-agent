@@ -15,6 +15,8 @@ import logging
 from typing import Optional
 
 import torch
+from transformers import StaticCache
+from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 from macaw_tts.sampling import sample_logits
 
@@ -105,8 +107,6 @@ class PredictorCUDAGraph:
 
     def _init_static_cache(self):
         """Create StaticCache and force lazy layer init."""
-        from transformers import StaticCache
-
         self.static_cache = StaticCache(
             config=self.pred_model.config, max_cache_len=self.max_seq
         )
@@ -125,11 +125,6 @@ class PredictorCUDAGraph:
 
     def _make_attn_mask(self, input_embeds: torch.Tensor, cache_position: torch.Tensor):
         """Build attention mask dict for model forward."""
-        from transformers.masking_utils import (
-            create_causal_mask,
-            create_sliding_window_causal_mask,
-        )
-
         mask = create_causal_mask(
             config=self.pred_model.config,
             input_embeds=input_embeds,
@@ -219,7 +214,7 @@ class PredictorCUDAGraph:
 
         🟢 GPU REQUIRED.
         """
-        logger.info(f"Warming up predictor ({num_warmup} runs)...")
+        logger.info("predictor_warmup num_warmup=%d", num_warmup)
 
         self._init_static_cache()
         self._build_attention_masks()
@@ -242,6 +237,12 @@ class PredictorCUDAGraph:
                     self._full_loop()
                     torch.cuda.synchronize()
 
+                    # reset() MUST stay outside the CUDA graph capture.
+                    # StaticCache.reset() modifies Python-side state
+                    # (cumulative_length on StaticSlidingWindowLayer) that is NOT
+                    # captured by CUDA graphs. If captured, replay() would zero the
+                    # tensors but leave cumulative_length stale, causing silent
+                    # corruption when sliding_window attention is used.
                     self.static_cache.reset()
                     with torch.cuda.graph(self.graph):
                         self._full_loop()
@@ -274,6 +275,15 @@ class PredictorCUDAGraph:
             )
 
         self.input_buf.copy_(pred_input)
+        # reset() MUST be called before replay() — it zeros the StaticCache
+        # tensors AND resets Python-side state (cumulative_length on
+        # StaticSlidingWindowLayer). CUDA graphs only capture GPU kernel
+        # launches, so Python-side state changes cannot be inside the graph.
+        # The tensor .zero_() ops here are redundant with the captured state
+        # but the Python-side reset is essential for correctness.
         self.static_cache.reset()
         self.graph.replay()
+        # clone() is mandatory: output_tokens is the static CUDA graph buffer
+        # that gets overwritten on the next replay(). The caller (streaming_generate)
+        # stores the result in codes_buffer for later decoding.
         return self.output_tokens.clone()

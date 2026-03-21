@@ -11,8 +11,11 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Dict, Generator, List, Optional, Tuple
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, AsyncGenerator, Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -26,29 +29,88 @@ from macaw_tts.talker_graph import TalkerCUDAGraph
 
 logger = logging.getLogger("macaw-tts")
 
+# Dedicated single-thread executor for GPU-bound TTS generation.
+# Using the default asyncio executor would block its shared thread pool,
+# starving the event loop when multiple requests are in-flight.
+# max_workers=1 because CUDA graph static buffers are batch_size=1.
+_GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="macaw-gpu")
+
+# Hardcoded instead of mimetypes.guess_type() because:
+# - mimetypes depends on system mime database which varies across OS/distro
+# - Explicit set is auditable and deterministic
+# - We validate extension, not content — mimetypes would add indirection without value
 _ALLOWED_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"})
 
 
+# System paths that can cause hangs or crashes when read as regular files
+# (device files, kernel interfaces, pseudo-filesystems).
+# Note: /etc is NOT blocked — while uncommon, audio files could legitimately
+# be stored there. The extension check + file size check provide defense in depth.
+_BLOCKED_PATH_PREFIXES = ("/proc", "/sys", "/dev")
+
+
+_MAX_REF_AUDIO_SIZE = 50 * 1024 * 1024  # 50MB — generous limit for reference audio
+
+
 def _validate_audio_path(path: str) -> None:
-    """Validate ref_audio path to prevent path traversal and non-audio file access."""
+    """Validate ref_audio path to prevent path traversal and non-audio file access.
+
+    Resolves symlinks via realpath, then checks:
+    1. Not in system-sensitive directories (/proc, /sys, /dev)
+    2. File exists and is a regular file (not device, socket, pipe)
+    3. Extension is a known audio format
+    4. File size is within reasonable bounds
+    """
     import os
 
     resolved = os.path.realpath(path)
+
+    for prefix in _BLOCKED_PATH_PREFIXES:
+        if resolved.startswith(prefix + "/") or resolved == prefix:
+            raise ValueError(
+                f"ref_audio path resolves to blocked system directory: {resolved}"
+            )
+
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError(f"ref_audio not found: {resolved}")
+
     ext = os.path.splitext(resolved)[1].lower()
     if ext not in _ALLOWED_AUDIO_EXTENSIONS:
         raise ValueError(
             f"ref_audio must be an audio file ({', '.join(sorted(_ALLOWED_AUDIO_EXTENSIONS))}), "
             f"got: {ext!r}"
         )
-    if not os.path.isfile(resolved):
-        raise FileNotFoundError(f"ref_audio not found: {resolved}")
+
+    file_size = os.path.getsize(resolved)
+    if file_size > _MAX_REF_AUDIO_SIZE:
+        raise ValueError(
+            f"ref_audio file too large: {file_size / (1024*1024):.1f}MB "
+            f"(max {_MAX_REF_AUDIO_SIZE / (1024*1024):.0f}MB)"
+        )
+    if file_size == 0:
+        raise ValueError("ref_audio file is empty")
 
 
 class MacawTTS:
     """High-level streaming TTS using Qwen3-TTS with CUDA graphs.
 
     GPU REQUIRED for from_pretrained(), stream(), and stream_voice_clone().
+
+    Thread safety: This class is NOT thread-safe. CUDA graphs use pre-allocated
+    static buffers (batch_size=1) that would be corrupted by concurrent access.
+    A lock serializes concurrent stream() calls with a configurable timeout.
+    For async callers, astream()/astream_voice_clone() queue on the dedicated
+    GPU executor (_GPU_EXECUTOR, max_workers=1).
     """
+
+    # Default timeout for acquiring the generation lock (seconds).
+    # If a request can't acquire the lock within this time, it raises RuntimeError.
+    LOCK_TIMEOUT_S = 30.0
+
+    # Minimum free VRAM (MB) required to start a new generation.
+    # Prevents OOM mid-generation which leaves GPU in unrecoverable state.
+    # Set to 0 to disable the check.
+    MIN_FREE_VRAM_MB = 256
 
     def __init__(
         self,
@@ -67,6 +129,7 @@ class MacawTTS:
         self._device = device
         self._dtype = dtype
         self._warmed_up = False
+        self._lock = threading.Lock()
 
     def __repr__(self) -> str:
         return (
@@ -102,7 +165,9 @@ class MacawTTS:
         #   - SDPA + CUDA graphs: RTF 3.49x, TTFA 64ms (BEST)
         attn_implementation = "sdpa"
 
-        logger.info(f"Loading Qwen3-TTS: {model_name} on {device} (attn={attn_implementation})")
+        logger.info(
+            "loading model=%s device=%s attn=%s", model_name, device, attn_implementation,
+        )
         base_model = Qwen3TTSModel.from_pretrained(
             model_name, device_map=device, dtype=dtype,
             attn_implementation=attn_implementation,
@@ -123,9 +188,13 @@ class MacawTTS:
         )
 
         speech_tokenizer = base_model.model.speech_tokenizer
+        # Use codec_pad_id for decoder left-padding to avoid audio artifacts.
+        # codec_pad_id is the model's designated padding token for codec sequences.
+        codec_pad_id = getattr(talker_config, "codec_pad_id", 0)
         decoder = StreamingDecoder(
             speech_tokenizer, decode_window=decode_window,
             context_frames=context_frames,
+            pad_token_id=codec_pad_id,
         )
         if compile_decoder:
             decoder.compile(mode="reduce-overhead")
@@ -138,16 +207,83 @@ class MacawTTS:
 
     def _warmup(self, prefill_len: int) -> None:
         """Capture CUDA graphs. GPU REQUIRED."""
+        self._check_upstream_compat()
         logger.info("Capturing CUDA graphs...")
         self._predictor_graph.capture(num_warmup=3)
         self._talker_graph.capture(prefill_len=prefill_len, num_warmup=3)
         self._warmed_up = True
         logger.info("CUDA graphs ready!")
 
+    def _check_upstream_compat(self) -> None:
+        """Verify upstream Qwen3-TTS APIs we depend on still exist.
+
+        _build_talker_inputs() is a manual port of upstream generate() logic.
+        If the upstream model changes method signatures or removes methods,
+        this check logs a warning so the port can be updated before it breaks
+        at runtime in the middle of a generation.
+        """
+        qwen_model = self._model.model
+        expected_methods = [
+            "generate_speaker_prompt",
+            "generate_icl_prompt",
+        ]
+        expected_attrs = [
+            "talker",
+            "speech_tokenizer",
+        ]
+        for method_name in expected_methods:
+            if not hasattr(qwen_model, method_name):
+                logger.warning(
+                    "upstream_compat_check: missing method %s on model — "
+                    "_build_talker_inputs() may need updating",
+                    method_name,
+                )
+        for attr_name in expected_attrs:
+            if not hasattr(qwen_model, attr_name):
+                logger.warning(
+                    "upstream_compat_check: missing attribute %s on model — "
+                    "model structure may have changed",
+                    attr_name,
+                )
+
+    def _check_vram_available(self) -> None:
+        """Check that enough GPU VRAM is available before starting generation.
+
+        Acts as a circuit breaker to prevent OOM mid-generation, which can leave
+        CUDA graphs in an unrecoverable state. If free VRAM is below threshold,
+        raises RuntimeError with diagnostic info.
+
+        Set MIN_FREE_VRAM_MB = 0 to disable.
+        """
+        if self.MIN_FREE_VRAM_MB <= 0:
+            return
+        if not torch.cuda.is_available():
+            return
+
+        device_idx = torch.device(self._device).index or 0
+        free_mb, total_mb = (
+            x / (1024 * 1024)
+            for x in torch.cuda.mem_get_info(device_idx)
+        )
+        if free_mb < self.MIN_FREE_VRAM_MB:
+            allocated_mb = torch.cuda.memory_allocated(device_idx) / (1024 * 1024)
+            raise RuntimeError(
+                f"Insufficient GPU VRAM: {free_mb:.0f}MB free, "
+                f"{self.MIN_FREE_VRAM_MB}MB required. "
+                f"(allocated={allocated_mb:.0f}MB, total={total_mb:.0f}MB). "
+                "This may indicate a VRAM leak or the model is too large for this GPU."
+            )
+
     # =========================================================================
     # Input building — adapted from upstream Qwen3-TTS generate()
     # Ported from Qwen3TTSForConditionalGeneration.generate() v0.6B-Base.
-    # If upstream changes, diff against this method.
+    # Upstream ref: qwen_tts v0.6B-Base, commit 2025-03 (initial public release).
+    # If upstream changes, diff this method against:
+    #   Qwen3TTSForConditionalGeneration.generate() → talker input building section
+    #
+    # DIVERGENCE CHECK: _check_upstream_compat() verifies at warmup time that
+    # upstream APIs we depend on still exist. If they change signature, we log
+    # a warning so the port can be updated.
     # =========================================================================
 
     def _build_talker_inputs(
@@ -370,6 +506,7 @@ class MacawTTS:
         emit_every_phase2: int = 4,
         phase1_frames: int = 1,
         overlap_samples: int = 512,
+        max_wall_time_s: float = 60.0,
     ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
         """Stream audio from text. GPU REQUIRED.
 
@@ -386,6 +523,7 @@ class MacawTTS:
             emit_every_phase1=emit_every_phase1,
             emit_every_phase2=emit_every_phase2,
             phase1_frames=phase1_frames, overlap_samples=overlap_samples,
+            max_wall_time_s=max_wall_time_s,
         )
 
     def stream_voice_clone(
@@ -405,6 +543,7 @@ class MacawTTS:
         emit_every_phase2: int = 4,
         phase1_frames: int = 1,
         overlap_samples: int = 512,
+        max_wall_time_s: float = 60.0,
     ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
         """Stream audio with voice cloning. GPU REQUIRED."""
         yield from self._stream_impl(
@@ -416,6 +555,7 @@ class MacawTTS:
             emit_every_phase1=emit_every_phase1,
             emit_every_phase2=emit_every_phase2,
             phase1_frames=phase1_frames, overlap_samples=overlap_samples,
+            max_wall_time_s=max_wall_time_s,
         )
 
     def _stream_impl(
@@ -436,8 +576,53 @@ class MacawTTS:
         emit_every_phase2: int,
         phase1_frames: int,
         overlap_samples: int,
+        max_wall_time_s: float = 60.0,
     ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
         """Shared implementation for stream() and stream_voice_clone()."""
+        acquired = self._lock.acquire(timeout=self.LOCK_TIMEOUT_S)
+        if not acquired:
+            raise RuntimeError(
+                f"MacawTTS generation lock timeout ({self.LOCK_TIMEOUT_S}s). "
+                "Another generation is still running. This may indicate a stuck "
+                "generation or unexpectedly long audio."
+            )
+        try:
+            yield from self._stream_locked(
+                text=text, language=language, speaker=speaker,
+                voice_clone_prompt=voice_clone_prompt,
+                ref_audio=ref_audio, ref_text=ref_text,
+                temperature=temperature, top_k=top_k, top_p=top_p,
+                repetition_penalty=repetition_penalty, max_frames=max_frames,
+                emit_every_phase1=emit_every_phase1,
+                emit_every_phase2=emit_every_phase2,
+                phase1_frames=phase1_frames, overlap_samples=overlap_samples,
+                max_wall_time_s=max_wall_time_s,
+            )
+        finally:
+            self._lock.release()
+
+    def _stream_locked(
+        self,
+        text: str,
+        language: str,
+        speaker: Optional[str],
+        voice_clone_prompt: Optional[Dict[str, Any]],
+        ref_audio: str,
+        ref_text: str,
+        *,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repetition_penalty: float,
+        max_frames: int,
+        emit_every_phase1: int,
+        emit_every_phase2: int,
+        phase1_frames: int,
+        overlap_samples: int,
+        max_wall_time_s: float = 60.0,
+    ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
+        """Locked implementation — called under self._lock."""
+        self._check_vram_available()
         qwen_model = self._model.model
 
         # Build voice clone prompt if needed
@@ -499,7 +684,62 @@ class MacawTTS:
             emit_every_phase2=emit_every_phase2,
             phase1_frames=phase1_frames,
             ref_codes=ref_codes,
+            max_wall_time_s=max_wall_time_s,
         )
+
+    async def astream(
+        self,
+        text: str,
+        language: str = "Portuguese",
+        speaker: Optional[str] = None,
+        **kwargs,
+    ) -> AsyncGenerator[tuple[np.ndarray, int, ChunkMetadata], None]:
+        """Async wrapper for stream(). Runs generation in a dedicated GPU thread.
+
+        Uses a single-thread executor (_GPU_EXECUTOR) to prevent blocking the
+        asyncio default thread pool. Each next() call on the sync generator is
+        dispatched to the GPU thread.
+
+        Usage:
+            async for chunk, sr, meta in tts.astream("Olá"):
+                await websocket.send(chunk.tobytes())
+        """
+        loop = asyncio.get_running_loop()
+        gen = self.stream(text, language, speaker, **kwargs)
+        try:
+            while True:
+                try:
+                    result = await loop.run_in_executor(_GPU_EXECUTOR, next, gen)
+                    yield result
+                except StopIteration:
+                    return
+        finally:
+            # Close the sync generator to trigger its finally blocks
+            # (lock release, crossfader reset). Run on GPU executor to ensure
+            # gen.close() executes on the same thread as next(gen), avoiding
+            # race conditions with the threading.Lock in _stream_impl.
+            await loop.run_in_executor(_GPU_EXECUTOR, gen.close)
+
+    async def astream_voice_clone(
+        self,
+        text: str,
+        language: str = "Portuguese",
+        ref_audio: str = "",
+        ref_text: str = "",
+        **kwargs,
+    ) -> AsyncGenerator[tuple[np.ndarray, int, ChunkMetadata], None]:
+        """Async wrapper for stream_voice_clone(). See astream() for details."""
+        loop = asyncio.get_running_loop()
+        gen = self.stream_voice_clone(text, language, ref_audio, ref_text, **kwargs)
+        try:
+            while True:
+                try:
+                    result = await loop.run_in_executor(_GPU_EXECUTOR, next, gen)
+                    yield result
+                except StopIteration:
+                    return
+        finally:
+            await loop.run_in_executor(_GPU_EXECUTOR, gen.close)
 
     @property
     def sample_rate(self) -> int:

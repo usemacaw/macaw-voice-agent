@@ -87,6 +87,28 @@ class HannCrossfader:
 
         return result
 
+    def drain(self) -> np.ndarray:
+        """Return remaining crossfade tail with fade-out applied.
+
+        Called at end-of-stream when no more chunks will follow, to flush the
+        overlap samples that process() withheld from the last intermediate chunk.
+        Without drain(), the last ~overlap_samples are silently lost.
+
+        Returns:
+            Float32 audio with fade-out, or empty array if no tail.
+        """
+        if self._prev_tail is None:
+            return np.array([], dtype=np.float32)
+
+        tail = self._prev_tail.copy()
+        self._prev_tail = None
+
+        if self._overlap > 0:
+            fade_len = min(self._overlap, len(tail))
+            tail[-fade_len:] *= self._fade_out[-fade_len:]
+
+        return tail
+
     def reset(self) -> None:
         """Clear state between utterances."""
         self._prev_tail = None
@@ -94,3 +116,8 @@ class HannCrossfader:
     @property
     def overlap_samples(self) -> int:
         return self._overlap
+
+    @property
+    def has_pending_tail(self) -> bool:
+        """True if there are unreturned overlap samples from a previous process() call."""
+        return self._prev_tail is not None

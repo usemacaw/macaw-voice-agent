@@ -110,3 +110,39 @@ class TestHannCrossfader:
         if len(r2) > 2 * ov:
             mid = r2[ov:-ov]
             np.testing.assert_allclose(mid, 0.8, atol=0.05)
+
+    def test_drain_returns_tail_with_fadeout(self):
+        """drain() should return remaining tail with fade-out applied."""
+        ov = 20
+        cf = HannCrossfader(overlap_samples=ov)
+
+        chunk = np.ones(100, dtype=np.float32)
+        cf.process(chunk, is_first=True)
+
+        # After process() without is_last, tail should be pending
+        assert cf.has_pending_tail is True
+
+        tail = cf.drain()
+        assert len(tail) == ov
+        # Fade-out applied: last sample should be near zero
+        assert tail[-1] < 0.1
+        # First sample should be near 1.0
+        assert tail[0] > 0.9
+
+        # After drain, no more pending
+        assert cf.has_pending_tail is False
+
+    def test_drain_returns_empty_when_no_tail(self):
+        cf = HannCrossfader(overlap_samples=10)
+        result = cf.drain()
+        assert len(result) == 0
+
+    def test_has_pending_tail_false_initially(self):
+        cf = HannCrossfader(overlap_samples=10)
+        assert cf.has_pending_tail is False
+
+    def test_has_pending_tail_false_after_is_last(self):
+        cf = HannCrossfader(overlap_samples=10)
+        chunk = np.ones(100, dtype=np.float32)
+        cf.process(chunk, is_first=True, is_last=True)
+        assert cf.has_pending_tail is False
