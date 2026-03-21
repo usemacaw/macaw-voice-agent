@@ -26,6 +26,23 @@ from macaw_tts.talker_graph import TalkerCUDAGraph
 
 logger = logging.getLogger("macaw-tts")
 
+_ALLOWED_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"})
+
+
+def _validate_audio_path(path: str) -> None:
+    """Validate ref_audio path to prevent path traversal and non-audio file access."""
+    import os
+
+    resolved = os.path.realpath(path)
+    ext = os.path.splitext(resolved)[1].lower()
+    if ext not in _ALLOWED_AUDIO_EXTENSIONS:
+        raise ValueError(
+            f"ref_audio must be an audio file ({', '.join(sorted(_ALLOWED_AUDIO_EXTENSIONS))}), "
+            f"got: {ext!r}"
+        )
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError(f"ref_audio not found: {resolved}")
+
 
 class MacawTTS:
     """High-level streaming TTS using Qwen3-TTS with CUDA graphs.
@@ -50,6 +67,12 @@ class MacawTTS:
         self._device = device
         self._dtype = dtype
         self._warmed_up = False
+
+    def __repr__(self) -> str:
+        return (
+            f"MacawTTS(device={self._device!r}, dtype={self._dtype}, "
+            f"warmed_up={self._warmed_up})"
+        )
 
     @classmethod
     def from_pretrained(
@@ -419,6 +442,7 @@ class MacawTTS:
 
         # Build voice clone prompt if needed
         if voice_clone_prompt is None and ref_audio:
+            _validate_audio_path(ref_audio)
             prompt_items = self._model.create_voice_clone_prompt(
                 ref_audio=ref_audio, ref_text=ref_text,
             )

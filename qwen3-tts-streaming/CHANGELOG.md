@@ -15,17 +15,33 @@
 - 73 testes unitários cobrindo 7/8 módulos — 100% CPU, sem GPU
 - Plano executável documentado em `PLANO_EXECUTAVEL.md` com evidências dos 4 projetos estudados
 
+### Added
+- Validação de `ref_audio` path em voice cloning para prevenir path traversal e acesso a arquivos não-áudio
+- Guards de captura em `TalkerCUDAGraph.run()` e `PredictorCUDAGraph.run()` — RuntimeError se captura não foi feita
+- Error recovery nos métodos `capture()` — reset de estado GPU em caso de falha durante captura
+- `__repr__` em `MacawTTS`, `TalkerCUDAGraph`, `PredictorCUDAGraph` para debugging em produção
+- 12 testes novos: guards de captura, repr, path validation, PCM precision, sampling tensor ops (total: 85)
+
 ### Changed
 - `_build_talker_inputs()`: parâmetro `m` renomeado para `qwen_model` para clareza
 - `stream()` e `stream_voice_clone()` refatorados para usar `_stream_impl()` (elimina duplicação)
 - `__init__.py` exporta apenas tipos realmente utilizados
 - `rope_deltas = None` documentado com comentário explicativo
+- Attention masks agora são lazy (computadas sob demanda e cacheadas) em vez de pré-construir 2048 masks no init — reduz consumo de VRAM de O(max_seq_len) para O(posições usadas)
+- `_build_suppress_mask()` usa operações tensoriais em vez de loop Python (1024 iterações eliminadas)
+- `transformers` pinado em `>=4.45,<4.50` para evitar breakage de APIs internas (`masking_utils`, `StaticCache`)
+- Removido `pytest-asyncio` de dev deps (não havia testes assíncronos)
 
 ### Fixed
 - **CRÍTICO:** `_sync_cuda()` recursão infinita corrigida (chamava a si mesma em vez de `torch.cuda.synchronize()`)
+- **CRÍTICO:** `CircularRepetitionPenalty.update()` eliminado sync CPU↔GPU — `.item()` substituído por operação tensorial pura
+- **CRÍTICO:** `TalkerCUDAGraph` pré-alocava 2048 attention masks consumindo até 448MB VRAM — migrado para lazy computation
 - `stream_voice_clone()` chamava `m._build_assistant_text` no inner model em vez de `self._model`
 - Duplicate `_warmup()` call removida em `stream_voice_clone()`
 - `decoder.py` docstring corrigido: samples_per_frame = 1920 (não 2000)
+- `pcm16_to_float32()` divisor corrigido de 32767 para 32768 — valor mais negativo (-32768) agora mapeia corretamente para [-1, 1]
+- Documentado `position_ids` shape `[3, 1, 1]` — 3 tipos de posição para Qwen3-TTS RoPE
+- Documentada limitação: PredictorCUDAGraph sampling params são fixos após captura do CUDA graph
 
 ### Removed
 - `streaming_generate_dynamic()` — dead code (140 linhas, nunca chamado)

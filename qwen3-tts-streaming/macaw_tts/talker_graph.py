@@ -9,7 +9,7 @@ as a CUDA graph for ~8ms/step (vs ~50ms without graphs).
 Strategy:
 - Prefill via HF forward (variable-length) → copies KV into StaticCache
 - Decode via CUDA graph replay (fixed-shape) → ~8ms/step
-- Pre-built attention mask table → O(1) per step
+- Lazy attention mask cache → O(1) per step after first computation
 """
 
 from __future__ import annotations
@@ -67,8 +67,13 @@ class TalkerCUDAGraph:
         self.graph: Optional[torch.cuda.CUDAGraph] = None
         self.captured = False
         self.attn_mask = None
-        self.attn_mask_table: Optional[list] = None
         self._mask_key = None
+
+    def __repr__(self) -> str:
+        return (
+            f"TalkerCUDAGraph(device={self.device!r}, captured={self.captured}, "
+            f"max_seq_len={self.max_seq_len}, layers={self.num_layers})"
+        )
 
     def _init_static_cache(self, config):
         """Create StaticCache and force lazy layer initialization."""
@@ -84,31 +89,49 @@ class TalkerCUDAGraph:
                 layer.lazy_initialization(dummy_k)
 
     def _build_attention_masks(self, attention_mask: torch.Tensor | None = None):
-        """Pre-build causal masks for all positions. O(1) lookup per step."""
+        """Prepare lazy mask generator. Masks are computed on-demand and cached.
+
+        Replaces the old approach of pre-building masks for all max_seq_len
+        positions (which consumed O(max_seq_len) GPU memory). Now uses a dict
+        cache that only stores masks for positions actually used.
+        """
         from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
-        dummy = torch.zeros(1, 1, self.hidden_size, dtype=self.dtype, device=self.device)
-        mask_fn = (
+        self._mask_dummy = torch.zeros(1, 1, self.hidden_size, dtype=self.dtype, device=self.device)
+        self._mask_fn = (
             create_sliding_window_causal_mask
             if getattr(self.model.config, "sliding_window", None) is not None
             else create_causal_mask
         )
+        self._mask_attention_mask = attention_mask
+        self._mask_cache: dict[int, torch.Tensor] = {}
 
-        self.attn_mask_table = [None] * self.max_seq_len
-        for i in range(self.max_seq_len):
-            pos = torch.tensor([i], device=self.device)
-            self.attn_mask_table[i] = mask_fn(
-                config=self.model.config,
-                input_embeds=dummy,
-                attention_mask=attention_mask,
-                cache_position=pos,
-                past_key_values=self.static_cache,
-            )
-
+        # Pre-compute position 0 to initialize attn_mask buffer
+        mask_0 = self._compute_mask(0)
         if self.attn_mask is None:
-            self.attn_mask = self.attn_mask_table[0].clone()
+            self.attn_mask = mask_0.clone()
         else:
-            self.attn_mask.copy_(self.attn_mask_table[0])
+            self.attn_mask.copy_(mask_0)
+
+    def _compute_mask(self, position: int) -> torch.Tensor:
+        """Compute and cache attention mask for a given position."""
+        if position in self._mask_cache:
+            return self._mask_cache[position]
+
+        pos = torch.tensor([position], device=self.device)
+        mask = self._mask_fn(
+            config=self.model.config,
+            input_embeds=self._mask_dummy,
+            attention_mask=self._mask_attention_mask,
+            cache_position=pos,
+            past_key_values=self.static_cache,
+        )
+        self._mask_cache[position] = mask
+        return mask
+
+    def _get_attn_mask(self, position: int) -> torch.Tensor:
+        """Get attention mask for position. Computes lazily if not cached."""
+        return self._compute_mask(position)
 
     def _decode_step(self):
         """Single-token decode through model forward."""
@@ -138,7 +161,7 @@ class TalkerCUDAGraph:
         self._build_attention_masks()
 
         self.cache_position[0] = prefill_len
-        self.attn_mask.copy_(self.attn_mask_table[prefill_len])
+        self.attn_mask.copy_(self._get_attn_mask(prefill_len))
 
         for _ in range(num_warmup):
             self._decode_step()
@@ -146,21 +169,28 @@ class TalkerCUDAGraph:
 
         logger.info("Capturing CUDA graph for talker decode...")
 
-        device_index = torch.device(self.device).index or torch.cuda.current_device()
-        with torch.cuda.device(device_index):
-            self.graph = torch.cuda.CUDAGraph()
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                self._decode_step()
-                torch.cuda.synchronize()
-                with torch.cuda.graph(self.graph):
+        try:
+            device_index = torch.device(self.device).index or torch.cuda.current_device()
+            with torch.cuda.device(device_index):
+                self.graph = torch.cuda.CUDAGraph()
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
                     self._decode_step()
+                    torch.cuda.synchronize()
+                    with torch.cuda.graph(self.graph):
+                        self._decode_step()
 
-        torch.cuda.current_stream().wait_stream(s)
-        torch.cuda.synchronize()
-        self.captured = True
-        logger.info("Talker CUDA graph captured!")
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
+            self.captured = True
+            logger.info("Talker CUDA graph captured!")
+        except Exception:
+            self.graph = None
+            self.static_cache = None
+            self._mask_cache = {}
+            logger.error("Talker CUDA graph capture failed, state reset")
+            raise
 
     def prefill_kv(self, past_key_values) -> int:
         """Copy HF DynamicCache from prefill into StaticCache.
@@ -204,7 +234,7 @@ class TalkerCUDAGraph:
                 if pads > 0:
                     full_attention_mask[b, :pads] = 0
 
-        if self.attn_mask_table is None or mask_key != self._mask_key:
+        if not hasattr(self, '_mask_cache') or mask_key != self._mask_key:
             self._build_attention_masks(full_attention_mask)
             self._mask_key = mask_key
 
@@ -230,11 +260,18 @@ class TalkerCUDAGraph:
         Returns:
             [1, 1, hidden_size] hidden states. Static buffer — use immediately or clone.
         """
+        if not self.captured:
+            raise RuntimeError(
+                "CUDA graph not captured. Call capture() before run()."
+            )
+
         self.input_buf.copy_(input_embeds)
         self.cache_position[0] = position
-        self.attn_mask.copy_(self.attn_mask_table[position])
+        self.attn_mask.copy_(self._get_attn_mask(position))
 
         delta = self.rope_deltas + self.cache_position[0].to(self.rope_deltas.dtype)
+        # position_ids has shape [3, 1, 1] — 3 position types for Qwen3-TTS RoPE
+        # (text position, codec position, fused position)
         self.position_ids.copy_(delta.unsqueeze(0).expand(3, -1, -1))
 
         self.graph.replay()

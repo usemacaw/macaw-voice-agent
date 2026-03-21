@@ -126,3 +126,19 @@ class TestCircularRepetitionPenalty:
 
         # After reset, no penalty on any token
         assert torch.allclose(result, logits)
+
+    def test_update_with_scalar_tensor(self):
+        """update() with a 0-dim tensor should work without .item() CPU sync."""
+        rp = CircularRepetitionPenalty(window=4, penalty=2.0, vocab_size=5, device="cpu")
+        rp.update(torch.tensor(2))
+        logits = torch.ones(1, 5) * 4.0
+        result = rp.apply(logits.clone())
+        assert result[0, 2].item() == pytest.approx(2.0)
+
+    def test_update_with_1d_tensor(self):
+        """update() with a 1-dim tensor [token_id] should work."""
+        rp = CircularRepetitionPenalty(window=4, penalty=2.0, vocab_size=5, device="cpu")
+        rp.update(torch.tensor([3]))
+        logits = torch.ones(1, 5) * 4.0
+        result = rp.apply(logits.clone())
+        assert result[0, 3].item() == pytest.approx(2.0)

@@ -110,3 +110,41 @@ class TestPcm16ToFloat32:
         pcm = np.zeros(10, dtype=np.int16).tobytes()
         result = pcm16_to_float32(pcm)
         np.testing.assert_array_equal(result, np.zeros(10, dtype=np.float32))
+
+    def test_most_negative_value_within_range(self):
+        """Most negative PCM16 (-32768) should map to [-1, 1] range."""
+        pcm = np.array([-32768], dtype=np.int16).tobytes()
+        result = pcm16_to_float32(pcm)
+        assert result[0] >= -1.0
+        assert result[0] <= 1.0
+
+
+class TestValidateAudioPath:
+    """Tests for voice clone ref_audio path validation."""
+
+    def test_rejects_non_audio_extension(self):
+        from macaw_tts.model import _validate_audio_path
+        with pytest.raises(ValueError, match="must be an audio file"):
+            _validate_audio_path("/etc/passwd")
+
+    def test_rejects_python_file(self):
+        from macaw_tts.model import _validate_audio_path
+        with pytest.raises(ValueError, match="must be an audio file"):
+            _validate_audio_path("/tmp/evil.py")
+
+    def test_rejects_nonexistent_audio_file(self):
+        from macaw_tts.model import _validate_audio_path
+        with pytest.raises(FileNotFoundError):
+            _validate_audio_path("/tmp/nonexistent_file_12345.wav")
+
+    def test_accepts_valid_wav_extension(self, tmp_path):
+        from macaw_tts.model import _validate_audio_path
+        wav_file = tmp_path / "test.wav"
+        wav_file.write_bytes(b"\x00" * 100)
+        _validate_audio_path(str(wav_file))  # should not raise
+
+    def test_accepts_valid_flac_extension(self, tmp_path):
+        from macaw_tts.model import _validate_audio_path
+        flac_file = tmp_path / "test.flac"
+        flac_file.write_bytes(b"\x00" * 100)
+        _validate_audio_path(str(flac_file))  # should not raise

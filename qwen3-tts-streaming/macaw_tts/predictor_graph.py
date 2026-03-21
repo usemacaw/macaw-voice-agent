@@ -26,6 +26,12 @@ class PredictorCUDAGraph:
 
     ⚠️ REQUIRES GPU — capture() and run() need CUDA device.
 
+    Note: sampling parameters (temperature, top_k, top_p, do_sample) are set at
+    init and baked into the CUDA graph at capture time. They cannot be changed
+    per-call because the graph replays the exact same kernel sequence. These
+    params control codebook token sampling (CB1-CB15) which is less sensitive to
+    temperature than the main CB0 sampling in streaming_generate().
+
     Usage:
         graph = PredictorCUDAGraph(code_predictor, config, talker_hidden_size)
         graph.capture()  # 🟢 GPU
@@ -52,7 +58,7 @@ class PredictorCUDAGraph:
         self.num_codebooks = self.num_code_groups - 1  # 15
         self.max_seq = 2 + self.num_codebooks  # 17
 
-        # Sampling parameters
+        # Sampling parameters — baked into CUDA graph at capture time
         self.do_sample = do_sample
         self.top_k = top_k
         self.top_p = top_p
@@ -90,6 +96,12 @@ class PredictorCUDAGraph:
         self.captured = False
         self.prefill_attn = None
         self.decode_attn: Optional[list] = None
+
+    def __repr__(self) -> str:
+        return (
+            f"PredictorCUDAGraph(device={self.device!r}, captured={self.captured}, "
+            f"codebooks={self.num_codebooks})"
+        )
 
     def _init_static_cache(self):
         """Create StaticCache and force lazy layer init."""
@@ -219,24 +231,30 @@ class PredictorCUDAGraph:
 
         logger.info("Capturing CUDA graph for predictor...")
 
-        device_index = torch.device(self.device).index or torch.cuda.current_device()
-        with torch.cuda.device(device_index):
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                self.graph = torch.cuda.CUDAGraph()
-                self.static_cache.reset()
-                self._full_loop()
-                torch.cuda.synchronize()
-
-                self.static_cache.reset()
-                with torch.cuda.graph(self.graph):
+        try:
+            device_index = torch.device(self.device).index or torch.cuda.current_device()
+            with torch.cuda.device(device_index):
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    self.graph = torch.cuda.CUDAGraph()
+                    self.static_cache.reset()
                     self._full_loop()
+                    torch.cuda.synchronize()
 
-        torch.cuda.current_stream().wait_stream(s)
-        torch.cuda.synchronize()
-        self.captured = True
-        logger.info("Predictor CUDA graph captured!")
+                    self.static_cache.reset()
+                    with torch.cuda.graph(self.graph):
+                        self._full_loop()
+
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
+            self.captured = True
+            logger.info("Predictor CUDA graph captured!")
+        except Exception:
+            self.graph = None
+            self.static_cache = None
+            logger.error("Predictor CUDA graph capture failed, state reset")
+            raise
 
     @torch.inference_mode()
     def run(self, pred_input: torch.Tensor) -> torch.Tensor:
@@ -250,6 +268,11 @@ class PredictorCUDAGraph:
         Returns:
             [15] long tensor of codebook token IDs.
         """
+        if not self.captured:
+            raise RuntimeError(
+                "CUDA graph not captured. Call capture() before run()."
+            )
+
         self.input_buf.copy_(pred_input)
         self.static_cache.reset()
         self.graph.replay()

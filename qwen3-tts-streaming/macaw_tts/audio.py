@@ -73,7 +73,7 @@ def pcm16_to_float32(pcm: bytes) -> np.ndarray:
         Float32 audio array.
     """
     samples = np.frombuffer(pcm, dtype=np.int16)
-    return samples.astype(np.float32) / 32767.0
+    return samples.astype(np.float32) / 32768.0
 
 
 def resample_to_internal(audio: np.ndarray, src_rate: int = CODEC_SAMPLE_RATE) -> np.ndarray:

@@ -193,9 +193,9 @@ def _build_suppress_mask(
     """Build suppress mask for last 1024 tokens minus EOS."""
     suppress_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
     suppress_start = max(0, vocab_size - 1024)
-    for i in range(suppress_start, vocab_size):
-        if i != eos_id:
-            suppress_mask[i] = True
+    suppress_mask[suppress_start:] = True
+    if 0 <= eos_id < vocab_size:
+        suppress_mask[eos_id] = False
     return suppress_mask
 
 

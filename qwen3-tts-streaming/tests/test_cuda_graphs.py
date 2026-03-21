@@ -181,3 +181,75 @@ class TestPredictorCUDAGraphInit:
         assert graph.top_k == 30
         assert graph.top_p == 0.9
         assert graph.do_sample is False
+
+
+class TestTalkerCUDAGraphGuards:
+    """Tests for capture guard and error recovery."""
+
+    def test_run_before_capture_raises(self):
+        config = _TalkerConfig()
+        model = _DummyModel(config)
+        graph = TalkerCUDAGraph(model, config, device="cpu")
+
+        with pytest.raises(RuntimeError, match="CUDA graph not captured"):
+            graph.run(torch.zeros(1, 1, 128), position=0)
+
+    def test_repr(self):
+        config = _TalkerConfig()
+        model = _DummyModel(config)
+        graph = TalkerCUDAGraph(model, config, device="cpu", max_seq_len=512)
+
+        r = repr(graph)
+        assert "TalkerCUDAGraph" in r
+        assert "captured=False" in r
+        assert "max_seq_len=512" in r
+
+
+class TestPredictorCUDAGraphGuards:
+    """Tests for capture guard and error recovery."""
+
+    def test_run_before_capture_raises(self):
+        config = _PredictorConfig()
+
+        class _Predictor(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
+                self.model = _DummyModel(config)
+                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
+                self.model.codec_embedding = torch.nn.ModuleList(
+                    [torch.nn.Embedding(100, 64) for _ in range(15)]
+                )
+
+        predictor = _Predictor()
+        graph = PredictorCUDAGraph(
+            predictor, config, talker_hidden_size=128,
+            device="cpu", dtype=torch.float32,
+        )
+
+        with pytest.raises(RuntimeError, match="CUDA graph not captured"):
+            graph.run(torch.zeros(1, 2, 128))
+
+    def test_repr(self):
+        config = _PredictorConfig()
+
+        class _Predictor(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.small_to_mtp_projection = torch.nn.Linear(128, 64)
+                self.model = _DummyModel(config)
+                self.lm_head = torch.nn.ModuleList([torch.nn.Linear(64, 100) for _ in range(15)])
+                self.model.codec_embedding = torch.nn.ModuleList(
+                    [torch.nn.Embedding(100, 64) for _ in range(15)]
+                )
+
+        predictor = _Predictor()
+        graph = PredictorCUDAGraph(
+            predictor, config, talker_hidden_size=128,
+            device="cpu", dtype=torch.float32,
+        )
+
+        r = repr(graph)
+        assert "PredictorCUDAGraph" in r
+        assert "captured=False" in r
+        assert "codebooks=15" in r

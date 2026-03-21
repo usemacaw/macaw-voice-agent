@@ -121,9 +121,10 @@ class CircularRepetitionPenalty:
         return torch.where(penalty_mask, penalized, logits)
 
     def update(self, token: torch.Tensor) -> None:
-        """Add token to circular buffer."""
+        """Add token to circular buffer. Pure tensor op, no CPU↔GPU sync."""
         pos = self._step % self.window
-        self._history[0, pos] = token.item() if token.dim() == 0 else token[0].item()
+        t = token.view(-1)[0] if token.dim() > 0 else token
+        self._history[0, pos] = t
         self._step += 1
 
     def reset(self) -> None:
