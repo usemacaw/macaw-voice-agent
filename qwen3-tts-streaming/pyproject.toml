@@ -7,7 +7,7 @@ name = "macaw-qwen3-tts-streaming"
 version = "0.1.0"
 description = "True streaming TTS for Qwen3-TTS with CUDA graphs, two-phase latency, and Hann crossfade"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5.1",
