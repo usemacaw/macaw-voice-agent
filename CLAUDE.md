@@ -54,9 +54,17 @@ src/
 │   ├── .env.example        # Template de configuração
 │   ├── server/
 │   │   ├── ws_server.py    # WebSocket lifecycle, health endpoint, rate limit
-│   │   ├── session.py      # RealtimeSession — state machine por conexão (~577 linhas)
-│   │   ├── response_runner.py  # LLM→tools→TTS→audio events (extraído de session)
-│   │   └── audio_input.py  # VAD, ASR, RMS, speech detection (extraído de session)
+│   │   ├── session.py      # RealtimeSession — protocol facade per connection
+│   │   ├── response_runner.py  # Response orchestrator (selects strategy, delegates)
+│   │   ├── response/          # Decomposed response paths
+│   │   │   ├── audio_response.py  # LLM → SentencePipeline → audio events
+│   │   │   ├── text_response.py   # LLM → text deltas
+│   │   │   └── tool_response.py   # LLM → tools → inline TTS → loop
+│   │   ├── audio_input.py  # VAD, ASR, RMS, speech detection
+│   │   ├── audio_emitter.py # TTS → encode → emit (unified)
+│   │   ├── conversation_store.py # Conversation items + memory
+│   │   ├── filler.py        # Filler phrases for tool waiting
+│   │   └── system_metrics.py # System health metrics
 │   ├── pipeline/
 │   │   ├── sentence_pipeline.py  # LLM→TTS streaming (producer-consumer)
 │   │   └── conversation.py       # Histórico → messages, windowing (últimos 8 items)

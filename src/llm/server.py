@@ -23,16 +23,6 @@ load_dotenv()
 logger = logging.getLogger("llm-server")
 
 
-def _configure_logging():
-    import os
-    level = os.getenv("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-
 # =============================================================================
 # LLM Provider loading
 # =============================================================================
@@ -102,31 +92,10 @@ class LLMServicer(llm_service_pb2_grpc.LLMServiceServicer):
 
     def __init__(self, provider, health_servicer=None):
         self._provider = provider
-        self._health = health_servicer
-        self._consecutive_errors = 0
-        self._MAX_ERRORS_BEFORE_UNHEALTHY = 5
-
-    def _record_success(self):
-        if self._consecutive_errors > 0:
-            self._consecutive_errors = 0
-            if self._health:
-                from grpc_health.v1 import health_pb2
-                self._health.set(
-                    "theo.llm.LLMService",
-                    health_pb2.HealthCheckResponse.SERVING,
-                )
-
-    def _record_error(self):
-        self._consecutive_errors += 1
-        if self._consecutive_errors >= self._MAX_ERRORS_BEFORE_UNHEALTHY and self._health:
-            from grpc_health.v1 import health_pb2
-            self._health.set(
-                "theo.llm.LLMService",
-                health_pb2.HealthCheckResponse.NOT_SERVING,
-            )
-            logger.error(
-                f"Provider degraded after {self._consecutive_errors} consecutive errors"
-            )
+        from common.grpc_server import HealthTracker
+        self._health_tracker = HealthTracker(
+            "theo.llm.LLMService", health_servicer,
+        )
 
     async def Generate(
         self,
@@ -154,10 +123,10 @@ class LLMServicer(llm_service_pb2_grpc.LLMServiceServicer):
                 max_tokens=request.max_tokens or 1024,
             ):
                 text_parts.append(chunk)
-            self._record_success()
+            self._health_tracker.record_success()
         except Exception as e:
             logger.error(f"Generate error: {e}")
-            self._record_error()
+            self._health_tracker.record_error()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return llm_pb.GenerateResponse()
@@ -205,7 +174,7 @@ class LLMServicer(llm_service_pb2_grpc.LLMServiceServicer):
                 )
                 event_count += 1
 
-            self._record_success()
+            self._health_tracker.record_success()
             logger.info(f"GenerateStream: {event_count} events")
 
         except asyncio.CancelledError:
@@ -213,7 +182,7 @@ class LLMServicer(llm_service_pb2_grpc.LLMServiceServicer):
             raise
         except Exception as e:
             logger.error(f"GenerateStream error: {e}")
-            self._record_error()
+            self._health_tracker.record_error()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
 
@@ -262,7 +231,8 @@ class LLMServer:
 
 
 async def main():
-    _configure_logging()
+    from common.grpc_server import configure_logging
+    configure_logging()
     server = LLMServer()
     await server.start()
     await server._micro.run_until_signal()

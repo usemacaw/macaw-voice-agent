@@ -8,7 +8,7 @@ Suporta modo batch (Synthesize) e streaming (SynthesizeStream).
 import asyncio
 import logging
 import time
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 import grpc
 
@@ -20,16 +20,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger("tts-server")
-
-
-def _configure_logging():
-    import os
-    level = os.getenv("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
 
 
 # =============================================================================
@@ -53,31 +43,10 @@ class TTSServicer(tts_service_pb2_grpc.TTSServiceServicer):
 
     def __init__(self, provider, health_servicer=None):
         self._provider = provider
-        self._health = health_servicer
-        self._consecutive_errors = 0
-        self._MAX_ERRORS_BEFORE_UNHEALTHY = 5
-
-    def _record_success(self):
-        if self._consecutive_errors > 0:
-            self._consecutive_errors = 0
-            if self._health:
-                from grpc_health.v1 import health_pb2
-                self._health.set(
-                    "theo.tts.TTSService",
-                    health_pb2.HealthCheckResponse.SERVING,
-                )
-
-    def _record_error(self):
-        self._consecutive_errors += 1
-        if self._consecutive_errors >= self._MAX_ERRORS_BEFORE_UNHEALTHY and self._health:
-            from grpc_health.v1 import health_pb2
-            self._health.set(
-                "theo.tts.TTSService",
-                health_pb2.HealthCheckResponse.NOT_SERVING,
-            )
-            logger.error(
-                f"Provider degraded after {self._consecutive_errors} consecutive errors"
-            )
+        from common.grpc_server import HealthTracker
+        self._health_tracker = HealthTracker(
+            "theo.tts.TTSService", health_servicer,
+        )
 
     async def Synthesize(
         self,
@@ -94,10 +63,10 @@ class TTSServicer(tts_service_pb2_grpc.TTSServiceServicer):
 
         try:
             audio = await self._provider.synthesize(request.text)
-            self._record_success()
+            self._health_tracker.record_success()
         except Exception as e:
             logger.error(f"Synthesize error: {e}")
-            self._record_error()
+            self._health_tracker.record_error()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return tts_pb.SynthesizeResponse()
@@ -150,7 +119,7 @@ class TTSServicer(tts_service_pb2_grpc.TTSServiceServicer):
                 is_last=True,
                 sequence=sequence,
             )
-            self._record_success()
+            self._health_tracker.record_success()
 
             logger.info(
                 f"SynthesizeStream: \"{request.text[:40]}...\" -> "
@@ -161,7 +130,7 @@ class TTSServicer(tts_service_pb2_grpc.TTSServiceServicer):
             logger.info("SynthesizeStream cancelado")
         except Exception as e:
             logger.error(f"SynthesizeStream error: {e}")
-            self._record_error()
+            self._health_tracker.record_error()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
 
@@ -206,7 +175,8 @@ class TTSServer:
 
 
 async def main():
-    _configure_logging()
+    from common.grpc_server import configure_logging
+    configure_logging()
     server = TTSServer()
     await server.start()
     await server._micro.run_until_signal()

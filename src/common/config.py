@@ -6,7 +6,7 @@ All values from environment variables, exposed as frozen dataclasses.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Union
 
 from dotenv import load_dotenv
@@ -109,29 +109,14 @@ TTS = TTSConfig(
 )
 
 
-# Legacy dict access — kept for backward compatibility with providers
-# that use AUDIO_CONFIG["sample_rate"] etc. Will be removed once all
-# consumers migrate to AUDIO.sample_rate.
-AUDIO_CONFIG = {
-    "sample_rate": AUDIO.sample_rate,
-    "channels": AUDIO.channels,
-    "sample_width": AUDIO.sample_width,
-}
-
-STT_CONFIG = {
-    "provider": STT.provider,
-    "language": STT.language,
-}
-
-TTS_CONFIG = {
-    "provider": TTS.provider,
-    "language": TTS.language,
-}
-
 LLM = LLMConfig(
     provider=os.getenv("LLM_BACKEND_PROVIDER", "vllm"),
 )
 
-LLM_CONFIG = {
-    "provider": LLM.provider,
-}
+# Legacy dict access — auto-generated from frozen dataclasses.
+# Kept for backward compatibility with providers that use
+# AUDIO_CONFIG["sample_rate"] etc. Prefer AUDIO.sample_rate.
+AUDIO_CONFIG = asdict(AUDIO)
+STT_CONFIG = asdict(STT)
+TTS_CONFIG = asdict(TTS)
+LLM_CONFIG = asdict(LLM)

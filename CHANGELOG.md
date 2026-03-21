@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Decomposed `ResponseRunner` god object (809→374 LOC): extracted `server/response/audio_response.py`, `server/response/text_response.py`, `server/response/tool_response.py` — each response path is now an independent, testable module
+- Extracted `HealthTracker` class into `common/grpc_server.py`: eliminates copy-pasted health tracking logic duplicated across STT, TTS, and LLM servers (~60 LOC x 3)
+- Extracted `configure_logging()` into `common/grpc_server.py`: eliminates duplicated `_configure_logging()` in each microservice
+- Migrated legacy config dicts (`AUDIO_CONFIG`, `STT_CONFIG`, etc.) to auto-generated via `dataclasses.asdict()` — eliminates manual dict/dataclass parallel maintenance
+
+### Added
+- 35 new tests: `test_event_emitter.py` (13 tests — cancellation fencing, backpressure escalation, throttling), `test_health_tracker.py` (7 tests — error counting, degradation, recovery), `test_conversation_store.py` (15 tests — CRUD, eviction, memory indexing)
+
+### Changed (prior)
 - Unified config API: all consumers migrated from legacy dict access (`CONFIG["key"]`) to frozen dataclass attributes (`POLICY.key`). Dict intermediaries made private (`_*_CONFIG`). New policies: `ASRPolicy`, `TTSPolicy`, `LogPolicy`
 - Decomposed `ResponseRunner._run_with_tools()` god method (240→145 lines): extracted `_stream_llm_with_inline_tts()`, `_capture_llm_timing()`, `_emit_fallback_response()`, eliminated 65-line inline closure
 - Removed dead provider references from registries: `whisper_stt`, `qwen_tts`, `kokoro_tts`, `faster_tts` entries pointing to deleted files

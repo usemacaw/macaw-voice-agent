@@ -22,16 +22,6 @@ load_dotenv()
 logger = logging.getLogger("stt-server")
 
 
-def _configure_logging():
-    import os
-    level = os.getenv("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-
 # =============================================================================
 # STT Provider loading
 # =============================================================================
@@ -53,31 +43,10 @@ class STTServicer(stt_service_pb2_grpc.STTServiceServicer):
 
     def __init__(self, provider, health_servicer=None):
         self._provider = provider
-        self._health = health_servicer
-        self._consecutive_errors = 0
-        self._MAX_ERRORS_BEFORE_UNHEALTHY = 5
-
-    def _record_success(self):
-        if self._consecutive_errors > 0:
-            self._consecutive_errors = 0
-            if self._health:
-                from grpc_health.v1 import health_pb2
-                self._health.set(
-                    "theo.stt.STTService",
-                    health_pb2.HealthCheckResponse.SERVING,
-                )
-
-    def _record_error(self):
-        self._consecutive_errors += 1
-        if self._consecutive_errors >= self._MAX_ERRORS_BEFORE_UNHEALTHY and self._health:
-            from grpc_health.v1 import health_pb2
-            self._health.set(
-                "theo.stt.STTService",
-                health_pb2.HealthCheckResponse.NOT_SERVING,
-            )
-            logger.error(
-                f"Provider degraded after {self._consecutive_errors} consecutive errors"
-            )
+        from common.grpc_server import HealthTracker
+        self._health_tracker = HealthTracker(
+            "theo.stt.STTService", health_servicer,
+        )
 
     async def Transcribe(
         self,
@@ -94,10 +63,10 @@ class STTServicer(stt_service_pb2_grpc.STTServiceServicer):
 
         try:
             text = await self._provider.transcribe(request.audio_data)
-            self._record_success()
+            self._health_tracker.record_success()
         except Exception as e:
             logger.error(f"Transcribe error: {e}")
-            self._record_error()
+            self._health_tracker.record_error()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return stt_pb.TranscribeResponse()
@@ -142,7 +111,7 @@ class STTServicer(stt_service_pb2_grpc.STTServiceServicer):
                     final_text = await self._provider.finish_streaming(
                         stream_id=stream_id,
                     )
-                    self._record_success()
+                    self._health_tracker.record_success()
                     logger.info(
                         f"[{stream_id[:8]}] Streaming STT finalizado: "
                         f"\"{final_text[:60] if final_text else ''}\""
@@ -171,7 +140,7 @@ class STTServicer(stt_service_pb2_grpc.STTServiceServicer):
             logger.info(f"[{stream_id and stream_id[:8] or '?'}] Stream cancelado")
         except Exception as e:
             logger.error(f"[{stream_id and stream_id[:8] or '?'}] Streaming error: {e}")
-            self._record_error()
+            self._health_tracker.record_error()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
 
@@ -216,7 +185,8 @@ class STTServer:
 
 
 async def main():
-    _configure_logging()
+    from common.grpc_server import configure_logging
+    configure_logging()
     server = STTServer()
     await server.start()
     await server._micro.run_until_signal()

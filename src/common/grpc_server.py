@@ -1,8 +1,8 @@
 """
-Shared gRPC server infrastructure for STT/TTS microservices.
+Shared gRPC server infrastructure for STT/TTS/LLM microservices.
 
 Provides common server configuration (keepalive, health check, reflection,
-graceful shutdown) to eliminate boilerplate duplication between servers.
+graceful shutdown) and health tracking to eliminate duplication between servers.
 """
 
 import asyncio
@@ -16,6 +16,55 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
 logger = logging.getLogger(__name__)
+
+
+def configure_logging() -> None:
+    """Standard logging setup for gRPC microservices."""
+    level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+
+class HealthTracker:
+    """Tracks provider health via consecutive error counting.
+
+    After `max_errors` consecutive failures, marks the service as NOT_SERVING.
+    A single success resets the counter and restores SERVING status.
+    """
+
+    def __init__(
+        self,
+        service_name: str,
+        health_servicer: Optional[health.HealthServicer] = None,
+        max_errors: int = 5,
+    ):
+        self._service_name = service_name
+        self._health = health_servicer
+        self._consecutive_errors = 0
+        self._max_errors = max_errors
+
+    def record_success(self) -> None:
+        if self._consecutive_errors > 0:
+            self._consecutive_errors = 0
+            if self._health:
+                self._health.set(
+                    self._service_name,
+                    health_pb2.HealthCheckResponse.SERVING,
+                )
+
+    def record_error(self) -> None:
+        self._consecutive_errors += 1
+        if self._consecutive_errors >= self._max_errors and self._health:
+            self._health.set(
+                self._service_name,
+                health_pb2.HealthCheckResponse.NOT_SERVING,
+            )
+            logger.error(
+                f"Provider degraded after {self._consecutive_errors} consecutive errors"
+            )
 
 
 def _default_grpc_options() -> list[tuple]:
