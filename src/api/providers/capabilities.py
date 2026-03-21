@@ -40,5 +40,5 @@ class LLMCapabilities:
     def from_provider(cls, provider) -> LLMCapabilities:
         return cls(
             tool_calling=hasattr(provider, "generate_stream_with_tools"),
-            thinking_mode=getattr(provider, "provider_name", "") == "vllm",
+            thinking_mode=False,
         )

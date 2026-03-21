@@ -12,25 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional, TYPE_CHECKING
 
 from audio.codec import INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH
+from audio.text_cleaning import strip_emojis
 from config import PIPELINE
 from pipeline.sentence_splitter import generate_sentences, split_long_sentence
 from providers.admission import ADMISSION
-
-# Strip emojis from sentences before TTS
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001f600-\U0001f64f\U0001f300-\U0001f5ff\U0001f680-\U0001f6ff"
-    "\U0001f1e0-\U0001f1ff\U0001f900-\U0001f9ff\U0001fa00-\U0001fa6f"
-    "\U0001fa70-\U0001faff\U00002702-\U000027b0\U000024c2-\U0001f251"
-    "\U0000fe0f\U0000200d"
-    "]+",
-)
 
 if TYPE_CHECKING:
     from providers.llm import LLMProvider
@@ -221,7 +211,7 @@ class SentencePipeline:
                 ):
                     sub_sentences = split_long_sentence(sentence, max_chars)
                     for sub in sub_sentences:
-                        clean = _EMOJI_RE.sub("", sub).strip()
+                        clean = strip_emojis(sub).strip()
                         if not clean:
                             continue
                         sentence_index += 1

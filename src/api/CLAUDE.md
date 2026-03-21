@@ -44,7 +44,7 @@ pytest tests/test_session.py -v
 
 ## Config
 
-All env vars. See `.env.example`. Key: `ASR_PROVIDER`, `TTS_PROVIDER`, `LLM_PROVIDER`, `ANTHROPIC_API_KEY`, `LLM_SYSTEM_PROMPT`, `TOOL_ENABLE_MOCK`.
+All env vars. See `.env.example`. Key: `ASR_PROVIDER`, `ASR_REMOTE_TARGET`, `TTS_PROVIDER`, `TTS_REMOTE_TARGET`, `LLM_PROVIDER`, `LLM_REMOTE_TARGET`, `LLM_SYSTEM_PROMPT`, `TOOL_ENABLE_MOCK`. All providers use gRPC remote by default.
 
 ## Audio Formats
 

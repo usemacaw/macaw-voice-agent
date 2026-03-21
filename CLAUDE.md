@@ -30,8 +30,11 @@ cd src && PYTHONPATH=. pytest stt/tests/ -v     # Testes
 cd src && PYTHONPATH=. python3 -m tts.server    # gRPC :50070
 cd src && PYTHONPATH=. pytest tts/tests/ -v     # Testes
 
+# --- LLM Server (src/llm/) ---
+cd src && PYTHONPATH=. python3 -m llm.server    # gRPC :50080
+
 # --- Docker (GPU) ---
-cd src && docker compose -f docker-compose.gpu.yml up -d   # STT + TTS
+cd src && docker compose -f docker-compose.gpu.yml up -d   # STT + TTS + LLM
 docker build -f src/stt/Dockerfile.whisper -t stt-whisper src/
 docker build -f src/tts/Dockerfile.kokoro-gpu -t tts-kokoro src/
 docker build -f src/llm/Dockerfile.qwen -t llm-qwen src/
@@ -62,11 +65,9 @@ src/
 │   │   ├── asr.py          # ABC: transcribe(), start_stream(), feed_chunk(), finish_stream()
 │   │   ├── llm.py          # ABC: generate_stream(), generate_stream_with_tools()
 │   │   ├── tts.py          # ABC: synthesize(), synthesize_stream()
-│   │   ├── asr_remote.py   # gRPC client para STT server
-│   │   ├── tts_remote.py   # gRPC client para TTS server
-│   │   ├── llm_anthropic.py    # Claude (converte formato OpenAI→Anthropic)
-│   │   ├── llm_openai.py       # GPT
-│   │   └── llm_vllm.py         # vLLM (OpenAI-compatible, desabilita thinking)
+│   │   ├── asr_remote.py   # gRPC client para STT server (:50060)
+│   │   ├── tts_remote.py   # gRPC client para TTS server (:50070)
+│   │   └── llm_remote.py   # gRPC client para LLM server (:50080)
 │   ├── tools/
 │   │   ├── registry.py     # ToolRegistry — register, execute, fork, timeout
 │   │   ├── handlers.py     # Mock tools bancários (demo)
@@ -84,15 +85,17 @@ src/
 │
 ├── stt/                    # Microserviço STT (gRPC :50060)
 │   ├── server.py           # STTServicer + STTServer
-│   ├── providers/          # whisper_stt, qwen_stt, mock
+│   ├── providers/          # qwen_stt, mock
 │   └── tests/
 │
 ├── tts/                    # Microserviço TTS (gRPC :50070)
 │   ├── server.py           # TTSServicer + TTSServer
-│   ├── providers/          # kokoro_tts, faster_tts, qwen_tts, mock
+│   ├── providers/          # macaw_streaming_tts, mock
 │   └── tests/
 │
-├── llm/                    # vLLM container (Dockerfile.qwen)
+├── llm/                    # Microserviço LLM (gRPC :50080)
+│   ├── server.py           # LLMServicer + LLMServer
+│   └── providers/          # vllm_provider, mock
 ├── web/                    # React + TypeScript + Vite + Tailwind v3
 │   └── src/
 │       ├── App.tsx                         # UI principal (Orb + Transcript + Metrics)
@@ -105,8 +108,8 @@ src/
 │           └── MetricsPanel.tsx            # Dashboard de observabilidade
 │
 ├── common/                 # Módulos compartilhados (config, audio_utils, executor)
-├── shared/                 # Stubs gRPC gerados (stt_service, tts_service)
-└── docker-compose.gpu.yml  # STT + TTS com GPU
+├── shared/                 # Stubs gRPC gerados (stt_service, tts_service, llm_service)
+└── docker-compose.gpu.yml  # STT + TTS + LLM com GPU
 ```
 
 ## Arquitetura
@@ -114,11 +117,12 @@ src/
 ### Pipeline Voice-to-Voice
 
 ```
-Mic → PCM16 24kHz → WebSocket → Silero VAD → ASR → LLM (+tools) → SentencePipeline → TTS → PCM16 24kHz → Speaker
+Mic → PCM16 24kHz → WebSocket → Silero VAD → ASR(gRPC) → LLM(gRPC+tools) → SentencePipeline → TTS(gRPC) → PCM16 24kHz → Speaker
 ```
 
 ### Decisões de Design
 
+- **Todos providers via gRPC:** API server é um orquestrador puro — ASR (:50060), TTS (:50070), LLM (:50080) são microserviços gRPC independentes
 - **LLM stateless:** recebe lista completa de messages a cada chamada. Histórico gerenciado por `RealtimeSession`
 - **Sentence pipelining:** LLM streama texto → split em frases → TTS sintetiza em paralelo (asyncio queues, prefetch de 4 frases). Primeiro áudio toca antes do LLM terminar de gerar
 - **Server-side VAD:** Silero ML (ONNX), 32ms chunks @ 8kHz. Callbacks `on_speech_started`/`on_speech_stopped`
@@ -155,11 +159,12 @@ Tudo via env vars. Referência completa em `src/api/.env.example`.
 
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
-| `ASR_PROVIDER` | `remote` | `remote`, `whisper`, `qwen` |
-| `TTS_PROVIDER` | `remote` | `remote`, `kokoro`, `edge` |
-| `LLM_PROVIDER` | `anthropic` | `anthropic`, `openai`, `vllm` |
-| `ANTHROPIC_API_KEY` | — | Obrigatório se `LLM_PROVIDER=anthropic` |
-| `VLLM_BASE_URL` | — | Obrigatório se `LLM_PROVIDER=vllm` |
+| `ASR_PROVIDER` | `remote` | Provider ASR (gRPC) |
+| `ASR_REMOTE_TARGET` | `localhost:50060` | Endereço do STT server |
+| `TTS_PROVIDER` | `remote` | Provider TTS (gRPC) |
+| `TTS_REMOTE_TARGET` | `localhost:50070` | Endereço do TTS server |
+| `LLM_PROVIDER` | `remote` | Provider LLM (gRPC) |
+| `LLM_REMOTE_TARGET` | `localhost:50080` | Endereço do LLM server |
 | `LLM_SYSTEM_PROMPT` | *(built-in)* | Prompt do agente de voz |
 | `TOOL_ENABLE_WEB_SEARCH` | `false` | Habilita DuckDuckGo |
 | `TOOL_ENABLE_MOCK` | `false` | Habilita tools bancários mock |

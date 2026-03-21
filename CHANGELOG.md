@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Decomposed `ResponseRunner._run_with_tools()` god method (240→145 lines): extracted `_stream_llm_with_inline_tts()`, `_capture_llm_timing()`, `_emit_fallback_response()`, eliminated 65-line inline closure
+- Refactored all providers to use gRPC remote only — API server is now a pure orchestrator
+- LLM provider: new gRPC microservice (`src/llm/server.py`, port 50080) with proto `theo.llm.LLMService`
+- LLM client: `llm_remote.py` replaces `llm_anthropic.py`, `llm_openai.py`, `llm_vllm.py`
+- Config defaults: `LLM_PROVIDER=remote`, `LLM_REMOTE_TARGET=localhost:50080`
+
+### Removed
+- Direct API providers: `llm_anthropic.py`, `llm_openai.py`, `llm_vllm.py`, `_openai_stream.py`
+- Local ASR providers: `asr_whisper.py`, `asr_qwen.py`
+- Local TTS providers: `tts_kokoro.py`, `tts_qwen.py`, `tts_edge.py`
+- API keys from API server config (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — moved to LLM server)
+
 ### Added
+- `audio/text_cleaning.py`: single source of truth for emoji stripping and Qwen3 thinking block removal — eliminates DRY violation between `response_runner.py` and `sentence_pipeline.py`
+- `IncrementalSplitter` in `pipeline/sentence_splitter.py`: reusable incremental sentence splitting for inline TTS during tool-calling — eliminates duplicated regex logic in `response_runner._run_with_tools()`
+- `server/audio_emitter.py`: unified TTS→encode→emit class with `emit_from_text()` and `emit_from_queue()` — eliminates 3 duplicated audio emission paths in `response_runner.py`
+- 29 new unit tests: `test_text_cleaning.py` (11), `test_incremental_splitter.py` (12), `test_audio_emitter.py` (6) covering text cleaning, sentence splitting, and audio emission
 - Cancellation fences in `EventEmitter`: events from stale `response_id` are silently dropped, preventing ghost audio/text during barge-in
 - Turn detection metrics: `vad_silence_wait_ms`, `smart_turn_inference_ms`, `smart_turn_waits` emitted in `macaw.metrics` per response
 - TTS first-class metrics: `tts_first_chunk_ms`, `tts_queue_max_depth`, `tts_calls` emitted in `macaw.metrics` per response

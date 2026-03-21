@@ -63,8 +63,9 @@ TTS_CONFIG = {
 }
 
 LLM_CONFIG = {
-    "provider": os.getenv("LLM_PROVIDER", "anthropic"),
-    "model": os.getenv("LLM_MODEL", "claude-sonnet-4-20250514"),
+    "provider": os.getenv("LLM_PROVIDER", "remote"),
+    "remote_target": os.getenv("LLM_REMOTE_TARGET", "localhost:50080"),
+    "model": os.getenv("LLM_MODEL", ""),
     "max_tokens": _env_int("LLM_MAX_TOKENS", 1024, 1, 100000),
     "temperature": _env_float("LLM_TEMPERATURE", 0.8, 0.0, 2.0),
     "timeout": _env_float("LLM_TIMEOUT", 30.0, 1.0, 300.0),
@@ -162,6 +163,7 @@ class PipelinePolicy:
 @dataclass(frozen=True)
 class LLMPolicy:
     provider: str
+    remote_target: str
     model: str
     max_tokens: int
     temperature: float

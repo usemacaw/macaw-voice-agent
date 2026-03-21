@@ -87,6 +87,11 @@ class TTSConfig:
     language: str = "pt"
 
 
+@dataclass(frozen=True)
+class LLMConfig:
+    provider: str = "mock"
+
+
 AUDIO = AudioConfig(
     sample_rate=_env_int("AUDIO_SAMPLE_RATE", "8000", min_val=1),
     channels=_env_int("AUDIO_CHANNELS", "1", min_val=1),
@@ -121,4 +126,12 @@ STT_CONFIG = {
 TTS_CONFIG = {
     "provider": TTS.provider,
     "language": TTS.language,
+}
+
+LLM = LLMConfig(
+    provider=os.getenv("LLM_BACKEND_PROVIDER", "vllm"),
+)
+
+LLM_CONFIG = {
+    "provider": LLM.provider,
 }

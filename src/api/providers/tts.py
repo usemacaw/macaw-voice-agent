@@ -11,9 +11,6 @@ from providers.registry import ProviderRegistry
 
 _registry: ProviderRegistry[TTSProvider] = ProviderRegistry("TTS", {
     "remote": "providers.tts_remote",
-    "qwen": "providers.tts_qwen",
-    "kokoro": "providers.tts_kokoro",
-    "edge": "providers.tts_edge",
 })
 
 

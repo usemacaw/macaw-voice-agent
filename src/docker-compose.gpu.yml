@@ -1,7 +1,7 @@
 version: "3.8"
 
 # =============================================================================
-# Docker Compose — STT (Whisper) + TTS (Kokoro) on single GPU host
+# Docker Compose — STT + TTS + LLM on single GPU host
 # =============================================================================
 # Build context: src/
 #   docker compose -f docker-compose.gpu.yml build
@@ -66,4 +66,31 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 60s
+      retries: 3
+
+  llm:
+    build:
+      context: .
+      dockerfile: llm/Dockerfile.qwen
+    ports:
+      - "50080:50080"
+    environment:
+      - LLM_BACKEND_PROVIDER=vllm
+      - VLLM_BASE_URL=http://localhost:8000/v1
+      - LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+      - GRPC_PORT=50080
+      - LOG_LEVEL=INFO
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import grpc; ch=grpc.insecure_channel('localhost:50080'); grpc.channel_ready_future(ch).result(timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
       retries: 3

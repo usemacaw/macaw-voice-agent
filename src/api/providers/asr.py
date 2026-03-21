@@ -10,8 +10,6 @@ from providers.registry import ProviderRegistry
 
 _registry: ProviderRegistry[ASRProvider] = ProviderRegistry("ASR", {
     "remote": "providers.asr_remote",
-    "qwen": "providers.asr_qwen",
-    "whisper": "providers.asr_whisper",
 })
 
 

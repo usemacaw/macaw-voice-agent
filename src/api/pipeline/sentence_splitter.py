@@ -77,6 +77,55 @@ async def generate_sentences(
         yield remaining
 
 
+class IncrementalSplitter:
+    """Feed text chunks incrementally, extract complete sentences.
+
+    Same eager-first logic as generate_sentences() but usable outside
+    the LLM streaming context (e.g., tool-calling path where LLM events
+    carry text deltas that need sentence splitting for inline TTS).
+    """
+
+    def __init__(self, min_eager_chars: int = 40) -> None:
+        self._buffer = ""
+        self._first_sentence = True
+        self._min_eager_chars = min_eager_chars
+
+    def feed(self, text: str) -> list[str]:
+        """Feed a text chunk and return any complete sentences found."""
+        self._buffer += text
+        sentences: list[str] = []
+
+        while True:
+            match = _SENTENCE_END.search(self._buffer)
+            if match:
+                sentence = self._buffer[:match.end()].strip()
+                self._buffer = self._buffer[match.end():]
+                if sentence:
+                    sentences.append(sentence)
+                    self._first_sentence = False
+                continue
+
+            if self._first_sentence and len(self._buffer) >= self._min_eager_chars:
+                match = _CLAUSE_BREAK.search(self._buffer)
+                if match:
+                    sentence = self._buffer[:match.end()].strip()
+                    self._buffer = self._buffer[match.end():]
+                    if sentence:
+                        sentences.append(sentence)
+                        self._first_sentence = False
+                    continue
+
+            break
+
+        return sentences
+
+    def flush(self) -> str | None:
+        """Return any remaining text in the buffer."""
+        remaining = self._buffer.strip()
+        self._buffer = ""
+        return remaining if remaining else None
+
+
 def split_long_sentence(sentence: str, max_chars: int) -> list[str]:
     """Split long sentence at natural break points."""
     sentence = sentence.strip()

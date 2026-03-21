@@ -24,9 +24,7 @@ class LLMStreamEvent:
     tool_arguments_delta: str = ""
 
 _registry: ProviderRegistry[LLMProvider] = ProviderRegistry("LLM", {
-    "anthropic": "providers.llm_anthropic",
-    "openai": "providers.llm_openai",
-    "vllm": "providers.llm_vllm",
+    "remote": "providers.llm_remote",
 })
 
 

@@ -1,0 +1,60 @@
+syntax = "proto3";
+package theo.llm;
+
+// =============================================================================
+// LLM Service — Language Model inference via gRPC
+// =============================================================================
+
+// --- Messages ---
+
+message ChatMessage {
+  string role = 1;                    // "system", "user", "assistant", "tool"
+  string content = 2;
+  repeated ToolCall tool_calls = 3;   // assistant messages with tool calls
+  string tool_call_id = 4;           // tool result messages
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string arguments = 3;              // JSON string
+}
+
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;        // JSON Schema as string
+}
+
+message GenerateRequest {
+  repeated ChatMessage messages = 1;
+  string system_prompt = 2;
+  repeated ToolDefinition tools = 3;
+  float temperature = 4;
+  int32 max_tokens = 5;
+  string model = 6;
+}
+
+message GenerateResponse {
+  string text = 1;
+  repeated ToolCall tool_calls = 2;
+  float processing_ms = 3;
+}
+
+message StreamEvent {
+  string event_type = 1;             // "text_delta", "tool_call_start", "tool_call_delta", "tool_call_end"
+  string text = 2;
+  string tool_call_id = 3;
+  string tool_name = 4;
+  string tool_arguments_delta = 5;
+}
+
+// --- Service ---
+
+service LLMService {
+  // Batch: messages -> complete response
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+
+  // Streaming: messages -> stream of events (text deltas + tool calls)
+  rpc GenerateStream(GenerateRequest) returns (stream StreamEvent);
+}

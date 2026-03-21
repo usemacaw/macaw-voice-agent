@@ -1,11 +1,8 @@
 """
-vLLM LLM provider for OpenVoiceAPI.
+vLLM provider (server-side) — connects to vLLM via OpenAI-compatible API.
 
-Connects to a vLLM server via its OpenAI-compatible API.
-Supports streaming text generation and function calling.
-
-Config:
-    LLM_PROVIDER=vllm
+Config (env vars):
+    LLM_BACKEND_PROVIDER=vllm
     VLLM_BASE_URL=http://localhost:8000/v1
     LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
 """
@@ -17,30 +14,33 @@ import os
 import time
 from typing import AsyncGenerator
 
-from config import LLM_CONFIG
-from providers.llm import LLMProvider, LLMStreamEvent, register_llm_provider
-from providers._openai_stream import parse_openai_tool_stream
+from llm.providers.base import LLMProvider, LLMStreamEvent, register_llm_provider
 
-logger = logging.getLogger("open-voice-api.llm.vllm")
+logger = logging.getLogger("llm-server.vllm")
 
 
 class VLLMProvider(LLMProvider):
-    """LLM provider that connects to a vLLM server via OpenAI-compatible API."""
+    """LLM provider backed by a vLLM server (OpenAI-compatible API)."""
 
     provider_name = "vllm"
 
-    def __init__(self):
+    async def connect(self) -> None:
         from openai import AsyncOpenAI
 
         base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+        self._model = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct-AWQ")
+        timeout = float(os.getenv("LLM_TIMEOUT", "30.0"))
 
-        self._model = LLM_CONFIG["model"]
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key="not-needed",
-            timeout=LLM_CONFIG["timeout"],
+            timeout=timeout,
         )
-        logger.info(f"vLLM provider initialized: model={self._model}, base_url={base_url}")
+        logger.info(f"vLLM provider connected: model={self._model}, base_url={base_url}")
+
+    async def disconnect(self) -> None:
+        if hasattr(self, "_client"):
+            await self._client.close()
 
     async def generate_stream(
         self,
@@ -66,21 +66,11 @@ class VLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
 
-        t0 = time.perf_counter()
-        first_token = False
-
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
-                if not first_token:
-                    first_token = True
-                    self.last_ttft_ms = (time.perf_counter() - t0) * 1000
-                    logger.info(f"LLM first token in {self.last_ttft_ms:.0f}ms")
                 yield delta.content
-
-        self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"LLM stream complete: {self.last_stream_total_ms:.0f}ms")
 
     async def generate_stream_with_tools(
         self,
@@ -90,7 +80,6 @@ class VLLMProvider(LLMProvider):
         temperature: float = 0.8,
         max_tokens: int = 1024,
     ) -> AsyncGenerator[LLMStreamEvent, None]:
-        """Stream with function calling support via vLLM's OpenAI-compatible API."""
         full_messages = []
         if system:
             full_messages.append({"role": "system", "content": system})
@@ -107,25 +96,45 @@ class VLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
 
-        t0 = time.perf_counter()
-
         stream = await self._client.chat.completions.create(**kwargs)
 
-        def _on_first_token():
-            self.last_ttft_ms = (time.perf_counter() - t0) * 1000
-            logger.info(f"LLM first event in {self.last_ttft_ms:.0f}ms")
+        active_tool_calls: dict[int, dict] = {}
 
-        async for event in parse_openai_tool_stream(stream, on_first_token=_on_first_token):
-            yield event
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if not delta:
+                continue
 
-        self.last_stream_total_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"LLM stream (with tools) complete: {self.last_stream_total_ms:.0f}ms")
+            if delta.content:
+                yield LLMStreamEvent(type="text_delta", text=delta.content)
 
-    async def connect(self) -> None:
-        pass
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in active_tool_calls:
+                        tc_id = tc.id or ""
+                        tc_name = tc.function.name if tc.function and tc.function.name else ""
+                        active_tool_calls[idx] = {"id": tc_id, "name": tc_name}
+                        yield LLMStreamEvent(
+                            type="tool_call_start",
+                            tool_call_id=tc_id,
+                            tool_name=tc_name,
+                        )
+                    if tc.function and tc.function.arguments:
+                        info = active_tool_calls[idx]
+                        yield LLMStreamEvent(
+                            type="tool_call_delta",
+                            tool_call_id=info["id"],
+                            tool_name=info["name"],
+                            tool_arguments_delta=tc.function.arguments,
+                        )
 
-    async def disconnect(self) -> None:
-        await self._client.close()
+        for info in active_tool_calls.values():
+            yield LLMStreamEvent(
+                type="tool_call_end",
+                tool_call_id=info["id"],
+                tool_name=info["name"],
+            )
 
 
 register_llm_provider("vllm", VLLMProvider)

@@ -1,33 +1,44 @@
 # LLM Server
 
-Standalone LLM inference server using vLLM with Qwen2.5-7B-Instruct-AWQ.
+Standalone gRPC Language Model microservice with pluggable providers.
 
 ## Commands
 
 ```bash
+# Run server (from src/)
+PYTHONPATH=. python3 -m llm.server
+
+# Run with vLLM backend
+LLM_BACKEND_PROVIDER=vllm VLLM_BASE_URL=http://localhost:8000/v1 PYTHONPATH=. python3 -m llm.server
+
 # Docker build (from src/)
 docker build -f llm/Dockerfile.qwen -t llm-server-qwen .
-
-# Docker run
-docker run --gpus all -p 8000:8000 llm-server-qwen
-
-# Test
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"Qwen/Qwen2.5-7B-Instruct-AWQ","messages":[{"role":"user","content":"Olá!"}],"max_tokens":100}'
 ```
 
 ## Architecture
 
-- **Engine:** vLLM with OpenAI-compatible API
-- **Model:** Qwen2.5-7B-Instruct-AWQ (4-bit quantized, ~5GB VRAM)
-- **Function calling:** Enabled via `--enable-auto-tool-choice --tool-call-parser hermes`
-- **Port:** 8000 (OpenAI-compatible `/v1/chat/completions`)
+- **Single file server:** `server.py` contains `LLMServicer` (gRPC handlers) and `LLMServer` (lifecycle)
+- **Self-contained providers:** `llm/providers/` — base, vllm_provider
+- **Common modules:** `common/` — config, grpc_server
+- **Proto stubs:** `shared/grpc_gen/llm_service_pb2{,_grpc}.py`
 
 ## Key Points
 
-- AWQ 4-bit quantization keeps VRAM under 6GB
-- `gpu-memory-utilization=0.85` leaves room for STT+TTS on shared GPU
-- Model pre-downloaded at build time to avoid cold-start
-- Supports streaming, function calling, system prompts
-- PT-BR: Qwen2.5 has strong multilingual support including Portuguese
+- Port: 50080 (env: `GRPC_PORT`)
+- Protocol: unary-stream gRPC (client sends messages, server streams StreamEvent)
+- StreamEvent maps 1:1 to LLMStreamEvent: text_delta, tool_call_start, tool_call_delta, tool_call_end
+- Tool calling: tools passed as ToolDefinition protos, server converts to OpenAI format
+- Messages: ChatMessage protos converted to OpenAI-format dicts internally
+- gRPC keepalive: 30s ping, 10s timeout, health + reflection enabled
+- Graceful shutdown: 5s grace period
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_BACKEND_PROVIDER` | `vllm` | Backend provider: vllm, anthropic, openai, mock |
+| `VLLM_BASE_URL` | `http://localhost:8000/v1` | vLLM OpenAI-compatible endpoint |
+| `LLM_MODEL` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | Model name |
+| `LLM_TIMEOUT` | `30.0` | Request timeout in seconds |
+| `GRPC_PORT` | `50080` | gRPC listen port |
+| `LOG_LEVEL` | `INFO` | Logging level |

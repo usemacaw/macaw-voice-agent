@@ -10,9 +10,7 @@ Kept as ResponseRunner for backward compatibility with existing imports.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import time
 import uuid
 from collections.abc import Sequence
@@ -20,14 +18,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from audio.codec import encode_audio_for_client
+from audio.text_cleaning import clean_for_voice
 from intelligence.context_builder import ContextBuilder
-from intelligence.response_strategy import ResponseMode, select_strategy
+from intelligence.response_strategy import select_strategy
 from intelligence.tool_engine import ToolExecutionEngine
 from pipeline.sentence_pipeline import SentencePipeline
+from pipeline.sentence_splitter import IncrementalSplitter
 from protocol import events
 from protocol.event_emitter import SlowClientError
 from protocol.models import ContentPart, ConversationItem
 from providers.admission import ADMISSION
+from server.audio_emitter import AudioEmitter
 
 if TYPE_CHECKING:
     from protocol.event_emitter import EventEmitter
@@ -37,36 +38,6 @@ if TYPE_CHECKING:
     from tools.registry import ToolRegistry
 
 logger = logging.getLogger("open-voice-api.response-runner")
-
-# ---------------------------------------------------------------------------
-# Text cleaning
-# ---------------------------------------------------------------------------
-
-_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
-
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001f600-\U0001f64f"
-    "\U0001f300-\U0001f5ff"
-    "\U0001f680-\U0001f6ff"
-    "\U0001f1e0-\U0001f1ff"
-    "\U0001f900-\U0001f9ff"
-    "\U0001fa00-\U0001fa6f"
-    "\U0001fa70-\U0001faff"
-    "\U00002702-\U000027b0"
-    "\U000024c2-\U0001f251"
-    "\U0000fe0f"
-    "\U0000200d"
-    "]+",
-)
-
-
-def _clean_for_voice(text: str) -> str:
-    """Strip thinking blocks and emojis from LLM output."""
-    text = _THINK_RE.sub("", text)
-    text = _EMOJI_RE.sub("", text)
-    return text.strip()
-
 
 # ---------------------------------------------------------------------------
 # Response context (shared session state)
@@ -244,7 +215,6 @@ class ResponseRunner:
         response_start = time.perf_counter()
         output_index = 0
 
-        # Create tool engine if server-side tools
         tool_engine = None
         if plan.server_side_tools and self._tool_registry:
             tool_engine = ToolExecutionEngine(
@@ -262,8 +232,6 @@ class ResponseRunner:
             round_max_tokens = max_tokens if allow_tools else min(max_tokens, 40)
 
             # Final round (no tools) + audio: use pipelined LLM->TTS
-            # Also use pipelined path on round 0 when no tools are registered,
-            # to avoid collecting full LLM text before TTS starts (batch anti-pattern).
             use_pipelined = not allow_tools or (tool_round == 0 and not plan.tools)
             if use_pipelined and plan.has_audio:
                 logger.info(
@@ -281,198 +249,39 @@ class ResponseRunner:
                 f"msgs={len(messages)}, tools={'yes' if allow_tools else 'no'}"
             )
 
-            # Collect full LLM stream: text + tool calls
-            # While streaming, also send text to TTS via sentence pipeline
-            # so audio starts flowing DURING LLM generation (not after).
-            collected_text = ""
-            collected_tool_calls: list[dict] = []
-            current_tool_call_id = ""
-            current_tool_name = ""
-            tool_arguments_buffer = ""
-            in_tool_call = False
-            saw_tool_call = False
-
-            # Sentence buffer for inline TTS streaming
-            tts_sentence_buffer = ""
-            tts_queue: asyncio.Queue | None = None
-            tts_task: asyncio.Task | None = None
-            first_audio_sent_inline = False
-
-            # Setup inline TTS pipeline if audio mode
-            if plan.has_audio and self._tts.supports_streaming:
-                tts_queue = asyncio.Queue(maxsize=10)
-
-                async def _inline_tts_worker(q, rid, oidx):
-                    """Synthesize sentences from queue as they arrive."""
-                    nonlocal first_audio_sent_inline
-                    item_id = f"item_{uuid.uuid4().hex[:24]}"
-                    cidx = 0
-                    assistant_item = ConversationItem(
-                        id=item_id, type="message", role="assistant",
-                        status="in_progress",
-                        content=[ContentPart(type="audio", audio="", transcript="")],
-                    )
-                    await self._emitter.emit(
-                        events.response_output_item_added("", rid, oidx, assistant_item)
-                    )
-                    async with self._ctx.state_lock:
-                        self._ctx.append_item(assistant_item)
-
-                    full_text = ""
-                    while True:
-                        sentence = await q.get()
-                        if sentence is None:
-                            break
-                        full_text += (" " if full_text else "") + sentence
-                        async for audio_chunk in self._tts.synthesize_stream(sentence):
-                            if not audio_chunk:
-                                continue
-                            audio_b64 = encode_audio_for_client(
-                                audio_chunk, self._config.output_audio_format
-                            )
-                            await self._emitter.emit(
-                                events.response_audio_delta(
-                                    "", rid, item_id, oidx, cidx, audio_b64
-                                )
-                            )
-                            if not first_audio_sent_inline:
-                                first_audio_sent_inline = True
-                                self._record_e2e_latency()
-                        await self._emitter.emit(
-                            events.response_audio_transcript_delta(
-                                "", rid, item_id, oidx, cidx, sentence
-                            )
-                        )
-
-                    # Finalize
-                    assistant_item.content[cidx] = ContentPart(
-                        type="audio", transcript=full_text
-                    )
-                    await self._emitter.emit(
-                        events.response_audio_done("", rid, item_id, oidx, cidx)
-                    )
-                    await self._emitter.emit(
-                        events.response_audio_transcript_done(
-                            "", rid, item_id, oidx, cidx, full_text
-                        )
-                    )
-                    await self._emitter.emit(
-                        events.response_content_part_done(
-                            "", rid, item_id, oidx, cidx,
-                            assistant_item.content[cidx],
-                        )
-                    )
-                    assistant_item.status = "completed"
-                    await self._emitter.emit(
-                        events.response_output_item_done("", rid, oidx, assistant_item)
-                    )
-                    return item_id, full_text
-
-                tts_task = asyncio.create_task(
-                    _inline_tts_worker(tts_queue, response_id, output_index)
+            # Stream LLM with optional inline TTS for text deltas
+            collected_text, collected_tool_calls, tts_task, tts_queue = (
+                await self._stream_llm_with_inline_tts(
+                    response_id, output_index, plan,
+                    messages, system, temperature, round_max_tokens,
+                    allow_tools,
                 )
+            )
+            saw_tool_call = bool(collected_tool_calls)
 
-            # Sentence splitting regex (inline, matches sentence_splitter.py)
-            import re
-            _sent_end = re.compile(r'[.!?]\s*$')
-            _clause_break = re.compile(r'[,;:\u2014\u2013]\s*$')
-            from config import STREAMING
-            _min_eager = STREAMING.min_eager_chars
-            _first_sentence_sent = False
-
-            async with ADMISSION.llm.acquire():
-                async for event in self._llm.generate_stream_with_tools(
-                    messages, system=system,
-                    tools=allow_tools or None,
-                    temperature=temperature,
-                    max_tokens=round_max_tokens,
-                ):
-                    if event.type == "text_delta":
-                        collected_text += event.text
-                        # Feed sentences to TTS inline (while LLM still generating)
-                        if tts_queue and not saw_tool_call:
-                            tts_sentence_buffer += event.text
-                            # Check for sentence boundary
-                            sent_match = _sent_end.search(tts_sentence_buffer)
-                            if sent_match:
-                                sentence = _clean_for_voice(tts_sentence_buffer[:sent_match.end()].strip())
-                                tts_sentence_buffer = tts_sentence_buffer[sent_match.end():]
-                                if sentence:
-                                    await tts_queue.put(sentence)
-                                    _first_sentence_sent = True
-                            elif not _first_sentence_sent and len(tts_sentence_buffer) >= _min_eager:
-                                clause_match = _clause_break.search(tts_sentence_buffer)
-                                if clause_match:
-                                    sentence = _clean_for_voice(tts_sentence_buffer[:clause_match.end()].strip())
-                                    tts_sentence_buffer = tts_sentence_buffer[clause_match.end():]
-                                    if sentence:
-                                        await tts_queue.put(sentence)
-                                        _first_sentence_sent = True
-
-                    elif event.type == "tool_call_start":
-                        current_tool_call_id = event.tool_call_id
-                        current_tool_name = event.tool_name
-                        tool_arguments_buffer = ""
-                        in_tool_call = True
-                        saw_tool_call = True
-                        # Cancel inline TTS — tool calls need different handling
-                        if tts_queue:
-                            await tts_queue.put(None)  # Signal end
-                    elif event.type == "tool_call_delta" and in_tool_call:
-                        tool_arguments_buffer += event.tool_arguments_delta
-                    elif event.type == "tool_call_end" and in_tool_call:
-                        collected_tool_calls.append({
-                            "id": current_tool_call_id,
-                            "name": current_tool_name,
-                            "arguments": tool_arguments_buffer,
-                        })
-                        in_tool_call = False
-
-            # Flush remaining text to TTS
-            if tts_queue and not saw_tool_call:
-                remaining = _clean_for_voice(tts_sentence_buffer.strip())
-                if remaining:
-                    await tts_queue.put(remaining)
-                await tts_queue.put(None)  # Signal end
-
-            # Wait for TTS to finish
+            # Wait for inline TTS to finish
             if tts_task and not saw_tool_call:
                 await tts_task
-                # Capture LLM timing
-                if tool_round == 0:
-                    self.metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
-                self.metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
+                self._capture_llm_timing(tool_round)
                 break  # Response done via inline TTS
-            else:
-                # Cancel TTS task if tool call happened
-                if tts_task:
-                    if not tts_task.done():
-                        await tts_task  # Already signaled None
-                    output_index += 1  # TTS item already emitted
+            elif tts_task:
+                if not tts_task.done():
+                    await tts_task  # Already signaled None
+                output_index += 1  # TTS item already emitted
 
-            # Capture LLM timing
-            if tool_round == 0:
-                self.metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
-            self.metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
+            self._capture_llm_timing(tool_round)
 
-            # No tool calls: response already emitted via inline TTS above
-            collected_text = _clean_for_voice(collected_text)
+            # No tool calls: emit fallback response if inline TTS didn't run
+            collected_text = clean_for_voice(collected_text)
             if not collected_tool_calls:
-                if not first_audio_sent_inline:
-                    # Fallback: TTS didn't run (e.g. audio disabled)
-                    if collected_text:
-                        if plan.has_audio:
-                            await self._emit_tool_response_audio(
-                                response_id, output_index, response_start,
-                                collected_text,
-                            )
-                        else:
-                            await self._emit_tool_response_text(
-                                response_id, output_index, collected_text,
-                            )
+                if collected_text:
+                    await self._emit_fallback_response(
+                        response_id, output_index, response_start,
+                        collected_text, plan.has_audio,
+                    )
                 break
 
-            # Has tool calls
+            # Execute tool calls
             logger.info(
                 f"[{self._sid[:8]}] Tool round {tool_round}: "
                 f"{len(collected_tool_calls)} tool call(s): "
@@ -490,7 +299,6 @@ class ResponseRunner:
                 output_index += result.output_index_delta
                 tools_used += 1
 
-                # Rebuild messages with tool results via ContextBuilder
                 async with self._ctx.state_lock:
                     messages = self._context_builder.rebuild_after_tool_round(
                         self._ctx.items
@@ -538,93 +346,138 @@ class ResponseRunner:
         )
 
     # ------------------------------------------------------------------
-    # Response emission helpers
+    # LLM streaming with inline TTS (extracted from _run_with_tools)
     # ------------------------------------------------------------------
 
-    async def _emit_tool_response_audio(
+    async def _stream_llm_with_inline_tts(
+        self,
+        response_id: str,
+        output_index: int,
+        plan,
+        messages: list[dict],
+        system: str,
+        temperature: float,
+        max_tokens: int,
+        allow_tools: list[dict] | None,
+    ) -> tuple[str, list[dict], asyncio.Task | None, asyncio.Queue | None]:
+        """Stream LLM events, feed text to inline TTS, collect tool calls.
+
+        Returns (collected_text, collected_tool_calls, tts_task, tts_queue).
+        """
+        from config import STREAMING
+
+        collected_text = ""
+        collected_tool_calls: list[dict] = []
+        saw_tool_call = False
+
+        # Tool call accumulation state
+        current_tool_call_id = ""
+        current_tool_name = ""
+        tool_arguments_buffer = ""
+        in_tool_call = False
+
+        # Inline TTS setup
+        tts_queue: asyncio.Queue | None = None
+        tts_task: asyncio.Task | None = None
+
+        if plan.has_audio and self._tts.supports_streaming:
+            tts_queue = asyncio.Queue(maxsize=10)
+            audio_emitter = AudioEmitter(
+                emitter=self._emitter,
+                tts=self._tts,
+                output_audio_format=self._config.output_audio_format,
+                on_first_audio=self._record_e2e_latency,
+            )
+            tts_task = asyncio.create_task(
+                audio_emitter.emit_from_queue(
+                    tts_queue, response_id, output_index,
+                    self._ctx.state_lock, self._ctx.append_item,
+                )
+            )
+
+        splitter = IncrementalSplitter(min_eager_chars=STREAMING.min_eager_chars)
+
+        async with ADMISSION.llm.acquire():
+            async for event in self._llm.generate_stream_with_tools(
+                messages, system=system,
+                tools=allow_tools or None,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ):
+                if event.type == "text_delta":
+                    collected_text += event.text
+                    if tts_queue and not saw_tool_call:
+                        for sentence in splitter.feed(event.text):
+                            clean = clean_for_voice(sentence)
+                            if clean:
+                                await tts_queue.put(clean)
+
+                elif event.type == "tool_call_start":
+                    current_tool_call_id = event.tool_call_id
+                    current_tool_name = event.tool_name
+                    tool_arguments_buffer = ""
+                    in_tool_call = True
+                    saw_tool_call = True
+                    if tts_queue:
+                        await tts_queue.put(None)
+                elif event.type == "tool_call_delta" and in_tool_call:
+                    tool_arguments_buffer += event.tool_arguments_delta
+                elif event.type == "tool_call_end" and in_tool_call:
+                    collected_tool_calls.append({
+                        "id": current_tool_call_id,
+                        "name": current_tool_name,
+                        "arguments": tool_arguments_buffer,
+                    })
+                    in_tool_call = False
+
+        # Flush remaining text to TTS
+        if tts_queue and not saw_tool_call:
+            remaining = splitter.flush()
+            if remaining:
+                clean = clean_for_voice(remaining)
+                if clean:
+                    await tts_queue.put(clean)
+            await tts_queue.put(None)
+
+        return collected_text, collected_tool_calls, tts_task, tts_queue
+
+    def _capture_llm_timing(self, tool_round: int) -> None:
+        """Capture LLM TTFT and total streaming time."""
+        if tool_round == 0:
+            self.metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
+        self.metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
+
+    async def _emit_fallback_response(
         self,
         response_id: str,
         output_index: int,
         response_start: float,
-        collected_text: str,
+        text: str,
+        has_audio: bool,
     ) -> None:
-        """Synthesize already-collected text through TTS (no extra LLM call)."""
-        item_id = f"item_{uuid.uuid4().hex[:24]}"
-        content_index = 0
-
-        assistant_item = ConversationItem(
-            id=item_id,
-            type="message",
-            role="assistant",
-            status="in_progress",
-            content=[ContentPart(type="audio", audio="", transcript="")],
-        )
-        await self._emitter.emit(
-            events.response_output_item_added(
-                "", response_id, output_index, assistant_item
+        """Emit response when inline TTS didn't run (fallback path)."""
+        if has_audio:
+            audio_emitter = AudioEmitter(
+                emitter=self._emitter,
+                tts=self._tts,
+                output_audio_format=self._config.output_audio_format,
+                on_first_audio=self._record_e2e_latency,
             )
-        )
-        async with self._ctx.state_lock:
-            self._ctx.append_item(assistant_item)
-
-        full_transcript = collected_text.strip()
-        first_audio_sent = False
-
-        logger.info(
-            f"[{self._sid[:8]}] TTS streaming synth: {full_transcript[:100]!r}"
-        )
-        # Always use streaming TTS — emit audio chunks as they're generated
-        async for audio_chunk in self._tts.synthesize_stream(full_transcript):
-            if not audio_chunk:
-                continue
-            audio_b64 = encode_audio_for_client(
-                audio_chunk, self._config.output_audio_format
+            logger.info(
+                f"[{self._sid[:8]}] TTS streaming synth: {text[:100]!r}"
             )
-            await self._emitter.emit(
-                events.response_audio_delta(
-                    "", response_id, item_id, output_index, content_index,
-                    audio_b64,
-                )
+            await audio_emitter.emit_from_text(
+                text, response_id, output_index,
+                self._ctx.state_lock, self._ctx.append_item,
             )
-            if not first_audio_sent:
-                first_audio_sent = True
-                self._record_e2e_latency()
-
-        if full_transcript:
-            await self._emitter.emit(
-                events.response_audio_transcript_delta(
-                    "", response_id, item_id, output_index, content_index,
-                    full_transcript,
-                )
+        else:
+            await self._emit_tool_response_text(
+                response_id, output_index, text,
             )
 
-        assistant_item.content[content_index] = ContentPart(
-            type="audio", transcript=full_transcript
-        )
-
-        await self._emitter.emit(
-            events.response_audio_done(
-                "", response_id, item_id, output_index, content_index
-            )
-        )
-        await self._emitter.emit(
-            events.response_audio_transcript_done(
-                "", response_id, item_id, output_index, content_index,
-                full_transcript,
-            )
-        )
-        await self._emitter.emit(
-            events.response_content_part_done(
-                "", response_id, item_id, output_index, content_index,
-                assistant_item.content[content_index],
-            )
-        )
-        assistant_item.status = "completed"
-        await self._emitter.emit(
-            events.response_output_item_done(
-                "", response_id, output_index, assistant_item
-            )
-        )
+    # ------------------------------------------------------------------
+    # Response emission helpers
+    # ------------------------------------------------------------------
 
     async def _emit_tool_response_audio_streamed(
         self,
