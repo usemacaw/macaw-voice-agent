@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -30,7 +30,7 @@ logger = logging.getLogger("macaw-tts")
 class MacawTTS:
     """High-level streaming TTS using Qwen3-TTS with CUDA graphs.
 
-    ⚠️ from_pretrained() REQUIRES GPU.
+    GPU REQUIRED for from_pretrained(), stream(), and stream_voice_clone().
     """
 
     def __init__(
@@ -64,27 +64,20 @@ class MacawTTS:
     ) -> "MacawTTS":
         """Load Qwen3-TTS and prepare CUDA graphs.
 
-        🟢 GPU REQUIRED.
+        GPU REQUIRED.
 
         Uses SDPA attention (not flash-attn) because CUDA graphs are
         incompatible with flash_attention_2. Validated on RTX 4090:
         SDPA+graphs gives TTFA=64ms, RTF=3.49x.
         """
-        attn_implementation = "sdpa"
         from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 
-        # IMPORTANT: flash_attention_2 is INCOMPATIBLE with CUDA graphs.
+        # SDPA is mandatory: flash_attention_2 is incompatible with CUDA graphs.
         # Tested on RTX 4090 (2026-03-20):
         #   - flash-attn + dynamic cache: RTF 0.54x (slower than real-time)
         #   - flash-attn + torch.compile: crashes (InternalTorchDynamoError)
         #   - SDPA + CUDA graphs: RTF 3.49x, TTFA 64ms (BEST)
-        # Force SDPA regardless of flash-attn availability.
-        if attn_implementation != "sdpa":
-            logger.warning(
-                f"attn_implementation='{attn_implementation}' requested but "
-                "flash_attention_2 is incompatible with CUDA graphs. Forcing 'sdpa'."
-            )
-            attn_implementation = "sdpa"
+        attn_implementation = "sdpa"
 
         logger.info(f"Loading Qwen3-TTS: {model_name} on {device} (attn={attn_implementation})")
         base_model = Qwen3TTSModel.from_pretrained(
@@ -121,7 +114,7 @@ class MacawTTS:
         )
 
     def _warmup(self, prefill_len: int) -> None:
-        """Capture CUDA graphs. 🟢 GPU REQUIRED."""
+        """Capture CUDA graphs. GPU REQUIRED."""
         logger.info("Capturing CUDA graphs...")
         self._predictor_graph.capture(num_warmup=3)
         self._talker_graph.capture(prefill_len=prefill_len, num_warmup=3)
@@ -130,12 +123,13 @@ class MacawTTS:
 
     # =========================================================================
     # Input building — adapted from upstream Qwen3-TTS generate()
-    # No external dependencies. Builds talker_input_embeds directly.
+    # Ported from Qwen3TTSForConditionalGeneration.generate() v0.6B-Base.
+    # If upstream changes, diff against this method.
     # =========================================================================
 
     def _build_talker_inputs(
         self,
-        m,
+        qwen_model,
         input_ids: List[torch.Tensor],
         ref_ids: Optional[List[Optional[torch.Tensor]]],
         voice_clone_prompt: Optional[Dict[str, Any]],
@@ -150,17 +144,17 @@ class MacawTTS:
         """
         talker_input_embeds = [[] for _ in range(len(input_ids))]
 
-        # Voice clone speaker prompt
         voice_clone_spk_embeds = None
         if voice_clone_prompt is not None:
-            voice_clone_spk_embeds = m.generate_speaker_prompt(voice_clone_prompt)
+            voice_clone_spk_embeds = qwen_model.generate_speaker_prompt(voice_clone_prompt)
 
-        # Instruct text
         if instruct_ids is not None:
             for index, instruct_id in enumerate(instruct_ids):
                 if instruct_id is not None:
                     talker_input_embeds[index].append(
-                        m.talker.text_projection(m.talker.get_text_embeddings()(instruct_id))
+                        qwen_model.talker.text_projection(
+                            qwen_model.talker.get_text_embeddings()(instruct_id)
+                        )
                     )
 
         if speakers is None:
@@ -178,11 +172,11 @@ class MacawTTS:
                     speaker_embed = None
                 else:
                     spk_key = speaker.lower()
-                    if spk_key not in m.config.talker_config.spk_id:
+                    if spk_key not in qwen_model.config.talker_config.spk_id:
                         raise ValueError(f"Speaker '{speaker}' not found")
-                    spk_id = m.config.talker_config.spk_id[spk_key]
-                    speaker_embed = m.talker.get_input_embeddings()(
-                        torch.tensor(spk_id, device=m.talker.device, dtype=input_id.dtype)
+                    spk_id = qwen_model.config.talker_config.spk_id[spk_key]
+                    speaker_embed = qwen_model.talker.get_input_embeddings()(
+                        torch.tensor(spk_id, device=qwen_model.talker.device, dtype=input_id.dtype)
                     )
             else:
                 if voice_clone_prompt["x_vector_only_mode"][index] or voice_clone_prompt["icl_mode"][index]:
@@ -195,26 +189,26 @@ class MacawTTS:
             if lang_lower == "auto":
                 language_id = None
             else:
-                if lang_lower not in m.config.talker_config.codec_language_id:
+                if lang_lower not in qwen_model.config.talker_config.codec_language_id:
                     raise ValueError(f"Language '{language}' not supported")
-                language_id = m.config.talker_config.codec_language_id[lang_lower]
+                language_id = qwen_model.config.talker_config.codec_language_id[lang_lower]
 
             # Dialect handling
             if (
                 lang_lower in ["chinese", "auto"]
                 and speaker not in ("", None)
-                and hasattr(m.config.talker_config, "spk_is_dialect")
-                and speaker.lower() in m.config.talker_config.spk_is_dialect
+                and hasattr(qwen_model.config.talker_config, "spk_is_dialect")
+                and speaker.lower() in qwen_model.config.talker_config.spk_is_dialect
             ):
-                dialect = m.config.talker_config.spk_is_dialect[speaker.lower()]
-                language_id = m.config.talker_config.codec_language_id[dialect]
+                dialect = qwen_model.config.talker_config.spk_is_dialect[speaker.lower()]
+                language_id = qwen_model.config.talker_config.codec_language_id[dialect]
 
             # BOS/EOS/PAD embeddings
-            tts_bos_embed, tts_eos_embed, tts_pad_embed = m.talker.text_projection(
-                m.talker.get_text_embeddings()(
+            tts_bos_embed, tts_eos_embed, tts_pad_embed = qwen_model.talker.text_projection(
+                qwen_model.talker.get_text_embeddings()(
                     torch.tensor(
-                        [[m.config.tts_bos_token_id, m.config.tts_eos_token_id, m.config.tts_pad_token_id]],
-                        device=m.talker.device, dtype=input_id.dtype,
+                        [[qwen_model.config.tts_bos_token_id, qwen_model.config.tts_eos_token_id, qwen_model.config.tts_pad_token_id]],
+                        device=qwen_model.talker.device, dtype=input_id.dtype,
                     )
                 )
             ).chunk(3, dim=1)
@@ -222,25 +216,25 @@ class MacawTTS:
             # Codec prefill tokens
             if language_id is None:
                 codec_prefill = [[
-                    m.config.talker_config.codec_nothink_id,
-                    m.config.talker_config.codec_think_bos_id,
-                    m.config.talker_config.codec_think_eos_id,
+                    qwen_model.config.talker_config.codec_nothink_id,
+                    qwen_model.config.talker_config.codec_think_bos_id,
+                    qwen_model.config.talker_config.codec_think_eos_id,
                 ]]
             else:
                 codec_prefill = [[
-                    m.config.talker_config.codec_think_id,
-                    m.config.talker_config.codec_think_bos_id,
+                    qwen_model.config.talker_config.codec_think_id,
+                    qwen_model.config.talker_config.codec_think_bos_id,
                     language_id,
-                    m.config.talker_config.codec_think_eos_id,
+                    qwen_model.config.talker_config.codec_think_eos_id,
                 ]]
 
-            codec_emb_0 = m.talker.get_input_embeddings()(
-                torch.tensor(codec_prefill, device=m.talker.device, dtype=input_id.dtype)
+            codec_emb_0 = qwen_model.talker.get_input_embeddings()(
+                torch.tensor(codec_prefill, device=qwen_model.talker.device, dtype=input_id.dtype)
             )
-            codec_emb_1 = m.talker.get_input_embeddings()(
+            codec_emb_1 = qwen_model.talker.get_input_embeddings()(
                 torch.tensor(
-                    [[m.config.talker_config.codec_pad_id, m.config.talker_config.codec_bos_id]],
-                    device=m.talker.device, dtype=input_id.dtype,
+                    [[qwen_model.config.talker_config.codec_pad_id, qwen_model.config.talker_config.codec_bos_id]],
+                    device=qwen_model.talker.device, dtype=input_id.dtype,
                 )
             )
 
@@ -249,9 +243,8 @@ class MacawTTS:
             else:
                 codec_emb = torch.cat([codec_emb_0, speaker_embed.view(1, 1, -1), codec_emb_1], dim=1)
 
-            # Role embedding (first 3 tokens of input: <|im_start|>assistant\n)
-            role_embed = m.talker.text_projection(
-                m.talker.get_text_embeddings()(input_id[:, :3])
+            role_embed = qwen_model.talker.text_projection(
+                qwen_model.talker.get_text_embeddings()(input_id[:, :3])
             )
 
             # Dual-track fusion: text_pad + codec
@@ -271,31 +264,29 @@ class MacawTTS:
                 and voice_clone_prompt.get("ref_code") is not None
                 and voice_clone_prompt["icl_mode"][index]
             ):
-                icl_embed, trailing_text_hidden = m.generate_icl_prompt(
+                icl_embed, trailing_text_hidden = qwen_model.generate_icl_prompt(
                     text_id=input_id[:, 3:-5],
                     ref_id=ref_ids[index][:, 3:-2],
-                    ref_code=voice_clone_prompt["ref_code"][index].to(m.talker.device).clone(),
+                    ref_code=voice_clone_prompt["ref_code"][index].to(qwen_model.talker.device).clone(),
                     tts_pad_embed=tts_pad_embed,
                     tts_eos_embed=tts_eos_embed,
                     non_streaming_mode=False,
                 )
                 talker_embed = torch.cat([talker_embed, icl_embed], dim=1)
             else:
-                # Standard mode: add first text token + codec_bos
                 talker_embed = torch.cat(
                     [
                         talker_embed,
-                        m.talker.text_projection(
-                            m.talker.get_text_embeddings()(input_id[:, 3:4])
+                        qwen_model.talker.text_projection(
+                            qwen_model.talker.get_text_embeddings()(input_id[:, 3:4])
                         ) + codec_emb[:, -1:],
                     ],
                     dim=1,
                 )
-                # Trailing text: remaining text tokens + EOS
                 trailing_text_hidden = torch.cat(
                     (
-                        m.talker.text_projection(
-                            m.talker.get_text_embeddings()(input_id[:, 4:-5])
+                        qwen_model.talker.text_projection(
+                            qwen_model.talker.get_text_embeddings()(input_id[:, 4:-5])
                         ),
                         tts_eos_embed,
                     ),
@@ -357,42 +348,21 @@ class MacawTTS:
         phase1_frames: int = 1,
         overlap_samples: int = 512,
     ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
-        """Stream audio from text. 🟢 GPU REQUIRED.
+        """Stream audio from text. GPU REQUIRED.
 
         Phase 1: emit first frame immediately (~88ms TTFA).
         Phase 2: emit every 4 frames (~333ms per chunk).
 
         Yields (audio_chunk_float32, sample_rate, metadata).
         """
-        m = self._model.model
-        input_texts = [self._model._build_assistant_text(text)]
-        input_ids = self._model._tokenize_texts(input_texts)
-
-        tie, tam, tth, tpe = self._build_talker_inputs(
-            m, input_ids, ref_ids=[None],
-            voice_clone_prompt=None,
-            languages=[language] if language else ["Auto"],
-            speakers=[speaker],
-        )
-
-        if not self._warmed_up:
-            self._warmup(tie.shape[1])
-
-        talker = m.talker
-        config = m.config.talker_config
-        talker.rope_deltas = None
-        crossfader = HannCrossfader(overlap_samples=overlap_samples)
-
-        yield from streaming_generate(
-            talker, tie, tam, tth, tpe, config,
-            self._predictor_graph, self._talker_graph,
-            self._decoder, crossfader,
-            max_new_tokens=max_frames,
+        yield from self._stream_impl(
+            text=text, language=language, speaker=speaker,
+            voice_clone_prompt=None, ref_audio="", ref_text="",
             temperature=temperature, top_k=top_k, top_p=top_p,
-            do_sample=True, repetition_penalty=repetition_penalty,
+            repetition_penalty=repetition_penalty, max_frames=max_frames,
             emit_every_phase1=emit_every_phase1,
             emit_every_phase2=emit_every_phase2,
-            phase1_frames=phase1_frames,
+            phase1_frames=phase1_frames, overlap_samples=overlap_samples,
         )
 
     def stream_voice_clone(
@@ -413,49 +383,84 @@ class MacawTTS:
         phase1_frames: int = 1,
         overlap_samples: int = 512,
     ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
-        """Stream audio with voice cloning. 🟢 GPU REQUIRED."""
-        m = self._model.model
+        """Stream audio with voice cloning. GPU REQUIRED."""
+        yield from self._stream_impl(
+            text=text, language=language, speaker=None,
+            voice_clone_prompt=voice_clone_prompt,
+            ref_audio=ref_audio, ref_text=ref_text,
+            temperature=temperature, top_k=top_k, top_p=top_p,
+            repetition_penalty=repetition_penalty, max_frames=max_frames,
+            emit_every_phase1=emit_every_phase1,
+            emit_every_phase2=emit_every_phase2,
+            phase1_frames=phase1_frames, overlap_samples=overlap_samples,
+        )
 
-        # Create voice clone prompt if not provided
-        if voice_clone_prompt is None:
+    def _stream_impl(
+        self,
+        text: str,
+        language: str,
+        speaker: Optional[str],
+        voice_clone_prompt: Optional[Dict[str, Any]],
+        ref_audio: str,
+        ref_text: str,
+        *,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repetition_penalty: float,
+        max_frames: int,
+        emit_every_phase1: int,
+        emit_every_phase2: int,
+        phase1_frames: int,
+        overlap_samples: int,
+    ) -> Generator[tuple[np.ndarray, int, ChunkMetadata], None, None]:
+        """Shared implementation for stream() and stream_voice_clone()."""
+        qwen_model = self._model.model
+
+        # Build voice clone prompt if needed
+        if voice_clone_prompt is None and ref_audio:
             prompt_items = self._model.create_voice_clone_prompt(
                 ref_audio=ref_audio, ref_text=ref_text,
             )
-            voice_clone_prompt = m._prompt_items_to_voice_clone_prompt(prompt_items)
+            voice_clone_prompt = qwen_model._prompt_items_to_voice_clone_prompt(prompt_items)
 
-        # Build ref_ids for ICL
+        # Build ref_ids for ICL mode
         ref_ids = [None]
-        if voice_clone_prompt.get("icl_mode", [False])[0] and ref_text:
+        if (
+            voice_clone_prompt is not None
+            and voice_clone_prompt.get("icl_mode", [False])[0]
+            and ref_text
+        ):
             ref_texts = [self._model._build_assistant_text(ref_text)]
             ref_ids = self._model._tokenize_texts(ref_texts)
 
-        input_texts = [m._build_assistant_text(text)]
-        input_ids = m._tokenize_texts(input_texts)
+        input_texts = [self._model._build_assistant_text(text)]
+        input_ids = self._model._tokenize_texts(input_texts)
 
         tie, tam, tth, tpe = self._build_talker_inputs(
-            m, input_ids, ref_ids=ref_ids,
+            qwen_model, input_ids, ref_ids=ref_ids,
             voice_clone_prompt=voice_clone_prompt,
             languages=[language] if language else ["Auto"],
-            speakers=[None],
+            speakers=[speaker],
         )
 
         if not self._warmed_up:
             self._warmup(tie.shape[1])
 
-        # Extract ref_codes for decoder context
+        # Extract ref_codes for decoder context (voice cloning ICL)
         ref_codes = None
         if (
-            voice_clone_prompt.get("ref_code")
+            voice_clone_prompt is not None
+            and voice_clone_prompt.get("ref_code")
             and voice_clone_prompt["ref_code"][0] is not None
             and voice_clone_prompt.get("icl_mode", [False])[0]
         ):
             ref_codes = voice_clone_prompt["ref_code"][0].to(self._device)
 
-        if not self._warmed_up:
-            self._warmup(tie.shape[1])
-
-        talker = m.talker
-        config = m.config.talker_config
+        talker = qwen_model.talker
+        config = qwen_model.config.talker_config
+        # Reset rope_deltas to prevent stale state from previous generation
+        # leaking into the new one (upstream HF generate sets this during run)
         talker.rope_deltas = None
         crossfader = HannCrossfader(overlap_samples=overlap_samples)
 

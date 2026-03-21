@@ -6,7 +6,7 @@ Decodes codec tokens → PCM float32 24kHz incrementally.
 Key techniques:
 - Fixed-shape left-padding for torch.compile (single compiled kernel)
 - Sliding window of 25 frames context (O(window) per decode, not O(total))
-- samples_per_frame = 2000 fixed (12Hz → 24kHz, no calibration needed)
+- samples_per_frame = 1920 (12Hz codec @ 24kHz = 24000/12.5 = 1920 samples/frame)
 """
 
 from __future__ import annotations
@@ -195,14 +195,6 @@ class StreamingDecoder:
             audio = np.asarray(audio, dtype=np.float32).flatten()
 
         return audio
-
-    def _get_device_params(self):
-        """Get device from tokenizer parameters."""
-        if hasattr(self._tokenizer, "parameters"):
-            return self._tokenizer.parameters()
-        if hasattr(self._tokenizer, "decoder"):
-            return self._tokenizer.decoder.parameters()
-        return iter([torch.tensor(0)])
 
     @property
     def decode_window_size(self) -> int:

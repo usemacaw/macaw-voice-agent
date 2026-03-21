@@ -18,9 +18,6 @@ INTERNAL_SAMPLE_RATE = 8000
 # 12Hz codec at 24kHz output = 1920 samples/frame (NOT 2000)
 SAMPLES_PER_FRAME = 1920
 
-# PCM16 sample width in bytes
-SAMPLE_WIDTH = 2
-
 
 def resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """Resample audio from src_rate to dst_rate.

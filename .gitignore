@@ -16,6 +16,6 @@ build/
 *.egg   
 models/
 node_modules/
-
+continue.txt
 # Claude Code
 .claude/settings.local.json
