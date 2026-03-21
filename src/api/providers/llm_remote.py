@@ -21,7 +21,7 @@ import grpc
 from grpc_gen import llm_service_pb2 as llm_pb
 from grpc_gen import llm_service_pb2_grpc
 
-from config import LLM_CONFIG
+from config import LLM
 from providers.llm import LLMProvider, LLMStreamEvent, register_llm_provider
 
 logger = logging.getLogger("open-voice-api.llm.remote")
@@ -33,8 +33,8 @@ class RemoteLLM(LLMProvider):
     provider_name = "remote"
 
     def __init__(self):
-        self._target = LLM_CONFIG.get("remote_target", "localhost:50080")
-        self._timeout = LLM_CONFIG["timeout"]
+        self._target = LLM.remote_target
+        self._timeout = LLM.timeout
         self._channel: grpc.aio.Channel | None = None
         self._stub: llm_service_pb2_grpc.LLMServiceStub | None = None
 

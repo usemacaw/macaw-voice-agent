@@ -171,7 +171,6 @@ _STT_PROVIDERS: Dict[str, Type[STTProvider]] = {
 _KNOWN_STT_MODULES = {
     "qwen": "stt.providers.qwen_stt",
     "qwen-streaming": "stt.providers.qwen_stt",
-    "whisper": "stt.providers.whisper_stt",
 }
 
 

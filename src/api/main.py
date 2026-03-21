@@ -11,7 +11,7 @@ import logging
 import signal
 import sys
 
-from config import ASR_CONFIG, TTS_CONFIG, LLM_CONFIG, TOOL_CONFIG, LOG_CONFIG
+from config import ASR, LLM, LOG, TTS
 from providers.asr import create_asr_provider
 from providers.tts import create_tts_provider
 from providers.llm import create_llm_provider
@@ -19,7 +19,7 @@ from server.ws_server import WebSocketServer
 from tools.registry import create_tool_registry
 
 logging.basicConfig(
-    level=getattr(logging, LOG_CONFIG["level"]),
+    level=getattr(logging, LOG.level),
     format="%(asctime)s %(name)-40s %(levelname)-5s %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -52,17 +52,17 @@ async def main() -> None:
     logger.info("Starting OpenVoiceAPI server...")
 
     # Create providers
-    asr = create_asr_provider(ASR_CONFIG["provider"])
-    tts = create_tts_provider(TTS_CONFIG["provider"])
-    llm = create_llm_provider(LLM_CONFIG["provider"])
+    asr = create_asr_provider(ASR.provider)
+    tts = create_tts_provider(TTS.provider)
+    llm = create_llm_provider(LLM.provider)
 
     # Create tool registry (registers mock handlers if TOOL_ENABLE_MOCK=true)
     tool_registry = create_tool_registry()
 
     logger.info(
-        f"Providers: ASR={ASR_CONFIG['provider']}, "
-        f"TTS={TTS_CONFIG['provider']}, "
-        f"LLM={LLM_CONFIG['provider']}, "
+        f"Providers: ASR={ASR.provider}, "
+        f"TTS={TTS.provider}, "
+        f"LLM={LLM.provider}, "
         f"Tools={'enabled (' + str(len(tool_registry.get_schemas())) + ' tools)' if tool_registry.has_server_tools else 'disabled'}"
     )
 

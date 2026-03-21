@@ -127,9 +127,6 @@ _TTS_PROVIDERS: Dict[str, Type[TTSProvider]] = {
 
 # Modulos conhecidos para auto-discovery (importados sob demanda)
 _KNOWN_TTS_MODULES = {
-    "qwen": "tts.providers.qwen_tts",
-    "kokoro": "tts.providers.kokoro_tts",
-    "faster": "tts.providers.faster_tts",
     "macaw-streaming": "tts.providers.macaw_streaming_tts",
 }
 

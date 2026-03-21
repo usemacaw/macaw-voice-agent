@@ -19,7 +19,7 @@ from urllib.parse import urlparse, parse_qs
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from config import WS_CONFIG
+from config import CONNECTION
 from server.session import RealtimeSession
 from server.system_metrics import SYSTEM_METRICS
 
@@ -58,8 +58,8 @@ class WebSocketServer:
         self._server = None
 
     async def start(self) -> None:
-        host = WS_CONFIG["host"]
-        port = WS_CONFIG["port"]
+        host = CONNECTION.host
+        port = CONNECTION.port
 
         self._server = await websockets.serve(
             self._handle_connection,
@@ -68,7 +68,7 @@ class WebSocketServer:
             process_request=self._process_request,
             max_size=16 * 1024 * 1024,
         )
-        if not WS_CONFIG["api_key"]:
+        if not CONNECTION.api_key:
             logger.warning(
                 "WARNING: No REALTIME_API_KEY configured. "
                 "Server accepting unauthenticated connections on %s:%s",
@@ -78,7 +78,7 @@ class WebSocketServer:
             logger.info(f"CORS: allowing origins {_ALLOWED_ORIGINS}")
         else:
             logger.warning("CORS: WS_ALLOWED_ORIGINS not set — accepting all origins")
-        logger.info(f"WebSocket server listening on ws://{host}:{port}{WS_CONFIG['path']}")
+        logger.info(f"WebSocket server listening on ws://{host}:{port}{CONNECTION.path}")
 
     async def stop(self) -> None:
         if self._server:
@@ -125,7 +125,7 @@ class WebSocketServer:
                 json.dumps({
                     "status": "ok" if all_healthy else "degraded",
                     "active_sessions": len(self._active_sessions),
-                    "max_connections": WS_CONFIG["max_connections"],
+                    "max_connections": CONNECTION.max_connections,
                     "providers": provider_health,
                 }) + "\n",
             )
@@ -140,7 +140,7 @@ class WebSocketServer:
             )
 
         # Check path
-        expected = WS_CONFIG["path"]
+        expected = CONNECTION.path
         if parsed.path != expected:
             return connection.respond(404, f"Not found: {parsed.path}\n")
 
@@ -152,11 +152,11 @@ class WebSocketServer:
                 return connection.respond(403, "Origin not allowed\n")
 
         # Check connection limit
-        if len(self._active_sessions) >= WS_CONFIG["max_connections"]:
+        if len(self._active_sessions) >= CONNECTION.max_connections:
             return connection.respond(503, "Too many connections\n")
 
         # Check auth (Bearer header or query parameter)
-        api_key = WS_CONFIG["api_key"]
+        api_key = CONNECTION.api_key
         if api_key:
             token = self._extract_token(request, parsed)
             if token is None:

@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Unified config API: all consumers migrated from legacy dict access (`CONFIG["key"]`) to frozen dataclass attributes (`POLICY.key`). Dict intermediaries made private (`_*_CONFIG`). New policies: `ASRPolicy`, `TTSPolicy`, `LogPolicy`
 - Decomposed `ResponseRunner._run_with_tools()` god method (240→145 lines): extracted `_stream_llm_with_inline_tts()`, `_capture_llm_timing()`, `_emit_fallback_response()`, eliminated 65-line inline closure
+- Removed dead provider references from registries: `whisper_stt`, `qwen_tts`, `kokoro_tts`, `faster_tts` entries pointing to deleted files
 - Refactored all providers to use gRPC remote only — API server is now a pure orchestrator
 - LLM provider: new gRPC microservice (`src/llm/server.py`, port 50080) with proto `theo.llm.LLMService`
 - LLM client: `llm_remote.py` replaces `llm_anthropic.py`, `llm_openai.py`, `llm_vllm.py`

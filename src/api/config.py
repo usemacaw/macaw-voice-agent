@@ -2,8 +2,11 @@
 Environment-based configuration for OpenVoiceAPI server.
 
 All settings loaded from env vars with sensible defaults.
-Frozen dataclasses provide type-safe access; legacy dicts remain for
-backward compatibility with providers not yet migrated.
+Frozen dataclasses provide type-safe access with IDE autocomplete.
+Internal dicts (prefixed _) are used only to construct the dataclasses.
+
+Public API: VAD, PIPELINE, LLM, CONNECTION, CONTEXT, SLO, TOOL,
+STREAMING, ASR, TTS, LOG (all frozen dataclass instances).
 """
 
 import os
@@ -36,7 +39,7 @@ def _env_float(var: str, default: float, min_val: float = 0.0, max_val: float = 
     return val
 
 
-WS_CONFIG = {
+_WS_CONFIG = {
     "host": os.getenv("WS_HOST", "0.0.0.0"),
     "port": _env_int("WS_PORT", 8765, 0, 65535),
     "path": os.getenv("WS_PATH", "/v1/realtime"),
@@ -44,7 +47,7 @@ WS_CONFIG = {
     "max_connections": _env_int("MAX_CONNECTIONS", 10, 1, 1000),
 }
 
-ASR_CONFIG = {
+_ASR_CONFIG = {
     "provider": os.getenv("ASR_PROVIDER", "remote"),
     "remote_target": os.getenv("ASR_REMOTE_TARGET", "localhost:50060"),
     "language": os.getenv("ASR_LANGUAGE", "pt"),
@@ -54,7 +57,7 @@ ASR_CONFIG = {
     "remote_streaming": os.getenv("ASR_REMOTE_STREAMING", "false").lower() == "true",
 }
 
-TTS_CONFIG = {
+_TTS_CONFIG = {
     "provider": os.getenv("TTS_PROVIDER", "remote"),
     "remote_target": os.getenv("TTS_REMOTE_TARGET", "localhost:50070"),
     "language": os.getenv("TTS_LANGUAGE", "pt"),
@@ -62,7 +65,7 @@ TTS_CONFIG = {
     "remote_timeout": _env_float("TTS_REMOTE_TIMEOUT", 60.0, 1.0, 600.0),
 }
 
-LLM_CONFIG = {
+_LLM_CONFIG = {
     "provider": os.getenv("LLM_PROVIDER", "remote"),
     "remote_target": os.getenv("LLM_REMOTE_TARGET", "localhost:50080"),
     "model": os.getenv("LLM_MODEL", ""),
@@ -72,7 +75,7 @@ LLM_CONFIG = {
     "system_prompt": os.getenv("LLM_SYSTEM_PROMPT", "You are a helpful assistant."),
 }
 
-VAD_CONFIG = {
+_VAD_CONFIG = {
     "aggressiveness": _env_int("VAD_AGGRESSIVENESS", 3, 0, 3),
     "silence_threshold_ms": _env_int("VAD_SILENCE_MS", 500, 50, 5000),
     "prefix_padding_ms": _env_int("VAD_PREFIX_PADDING_MS", 300, 0, 5000),
@@ -80,14 +83,14 @@ VAD_CONFIG = {
     "min_speech_rms": _env_int("VAD_MIN_SPEECH_RMS", 500, 0, 50000),
 }
 
-AUDIO_CONFIG = {
+_AUDIO_CONFIG = {
     "sample_rate": 24000,
     "channels": 1,
     "sample_width": 2,
     "internal_sample_rate": 8000,
 }
 
-PIPELINE_CONFIG = {
+_PIPELINE_CONFIG = {
     "sentence_queue_size": _env_int("PIPELINE_SENTENCE_QUEUE_SIZE", 6, 1, 100),
     "tts_prefetch_size": _env_int("PIPELINE_TTS_PREFETCH_SIZE", 4, 1, 50),
     "max_sentence_chars": _env_int("PIPELINE_MAX_SENTENCE_CHARS", 150, 50, 1000),
@@ -95,17 +98,17 @@ PIPELINE_CONFIG = {
     "sentence_timeout": _env_float("PIPELINE_SENTENCE_TIMEOUT", 15.0, 1.0, 120.0),
 }
 
-CONTEXT_CONFIG = {
+_CONTEXT_CONFIG = {
     "max_context_tokens": _env_int("LLM_MAX_CONTEXT_TOKENS", 4000, 500, 128000),
     "window_fallback": _env_int("LLM_WINDOW_FALLBACK", 8, 2, 50),
 }
 
-SLO_CONFIG = {
+_SLO_CONFIG = {
     "first_audio_ms": _env_float("SLO_FIRST_AUDIO_MS", 1500.0, 100.0, 30000.0),
     "first_audio_tool_ms": _env_float("SLO_FIRST_AUDIO_TOOL_MS", 5000.0, 500.0, 60000.0),
 }
 
-STREAMING_CONFIG = {
+_STREAMING_CONFIG = {
     "enable_early_llm_trigger": os.getenv("STREAMING_EARLY_LLM_TRIGGER", "false").lower() == "true",
     "min_stable_words": _env_int("STREAMING_MIN_STABLE_WORDS", 3, 1, 20),
     "partial_interval_ms": _env_int("STREAMING_PARTIAL_INTERVAL_MS", 300, 50, 2000),
@@ -114,7 +117,7 @@ STREAMING_CONFIG = {
     "min_eager_chars": _env_int("STREAMING_MIN_EAGER_CHARS", 10, 5, 50),
 }
 
-TOOL_CONFIG = {
+_TOOL_CONFIG = {
     "enable_mock_tools": os.getenv("TOOL_ENABLE_MOCK", "false").lower() == "true",
     "enable_web_search": os.getenv("TOOL_ENABLE_WEB_SEARCH", "false").lower() == "true",
     "timeout": _env_float("TOOL_TIMEOUT", 10.0, 1.0, 60.0),
@@ -131,14 +134,13 @@ if _raw_log_level not in _VALID_LOG_LEVELS:
         f"Valid: {sorted(_VALID_LOG_LEVELS)}"
     )
 
-LOG_CONFIG = {
+_LOG_CONFIG = {
     "level": _raw_log_level,
 }
 
 
 # ---------------------------------------------------------------------------
 # Frozen dataclass policies (type-safe access with autocomplete)
-# Legacy dicts above remain exported for backward compatibility.
 # ---------------------------------------------------------------------------
 
 
@@ -212,12 +214,38 @@ class StreamingPolicy:
     min_eager_chars: int
 
 
+@dataclass(frozen=True)
+class ASRPolicy:
+    provider: str
+    remote_target: str
+    language: str
+    remote_timeout: float
+    remote_streaming: bool
+
+
+@dataclass(frozen=True)
+class TTSPolicy:
+    provider: str
+    remote_target: str
+    language: str
+    voice: str
+    remote_timeout: float
+
+
+@dataclass(frozen=True)
+class LogPolicy:
+    level: str
+
+
 # Instantiate from the dicts loaded above
-VAD = VadPolicy(**VAD_CONFIG)
-PIPELINE = PipelinePolicy(**PIPELINE_CONFIG)
-LLM = LLMPolicy(**LLM_CONFIG)
-CONNECTION = ConnectionPolicy(**WS_CONFIG)
-CONTEXT = ContextPolicy(**CONTEXT_CONFIG)
-SLO = SLOPolicy(**SLO_CONFIG)
-TOOL = ToolPolicy(**TOOL_CONFIG)
-STREAMING = StreamingPolicy(**STREAMING_CONFIG)
+VAD = VadPolicy(**_VAD_CONFIG)
+PIPELINE = PipelinePolicy(**_PIPELINE_CONFIG)
+LLM = LLMPolicy(**_LLM_CONFIG)
+CONNECTION = ConnectionPolicy(**_WS_CONFIG)
+CONTEXT = ContextPolicy(**_CONTEXT_CONFIG)
+SLO = SLOPolicy(**_SLO_CONFIG)
+TOOL = ToolPolicy(**_TOOL_CONFIG)
+STREAMING = StreamingPolicy(**_STREAMING_CONFIG)
+ASR = ASRPolicy(**_ASR_CONFIG)
+TTS = TTSPolicy(**_TTS_CONFIG)
+LOG = LogPolicy(**_LOG_CONFIG)

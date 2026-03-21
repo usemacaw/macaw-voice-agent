@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
-from config import TOOL_CONFIG
+from config import TOOL
 
 logger = logging.getLogger("open-voice-api.tools")
 
@@ -52,9 +52,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolDef] = {}
         self._timeout = timeout
         self._max_rounds = max_rounds
-        self._default_filler = TOOL_CONFIG.get(
-            "default_filler", "Um momento, por favor."
-        )
+        self._default_filler = TOOL.default_filler
 
     def fork(self) -> ToolRegistry:
         """Create a copy of this registry for per-session customization.
@@ -187,17 +185,15 @@ class ToolRegistry:
 
 def create_tool_registry() -> ToolRegistry:
     """Create a ToolRegistry and register handlers based on config."""
-    timeout = TOOL_CONFIG.get("timeout", 10.0)
-    max_rounds = TOOL_CONFIG.get("max_rounds", 5)
-    registry = ToolRegistry(timeout=timeout, max_rounds=max_rounds)
+    registry = ToolRegistry(timeout=TOOL.timeout, max_rounds=TOOL.max_rounds)
 
-    if TOOL_CONFIG.get("enable_mock_tools", False):
+    if TOOL.enable_mock_tools:
         from tools.handlers import register_mock_handlers
 
         register_mock_handlers(registry)
         logger.info("Mock tool handlers registered")
 
-    if TOOL_CONFIG.get("enable_web_search", False):
+    if TOOL.enable_web_search:
         from tools.web_search import register_web_search_handlers
 
         register_web_search_handlers(registry)

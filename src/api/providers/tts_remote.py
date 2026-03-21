@@ -20,7 +20,7 @@ import grpc
 from grpc_gen import tts_service_pb2 as tts_pb
 from grpc_gen import tts_service_pb2_grpc
 
-from config import TTS_CONFIG
+from config import TTS
 from providers.tts import TTSProvider, register_tts_provider
 
 logger = logging.getLogger("open-voice-api.tts.remote")
@@ -32,9 +32,9 @@ class RemoteTTS(TTSProvider):
     provider_name = "remote"
 
     def __init__(self):
-        self._target = TTS_CONFIG["remote_target"]
-        self._language = TTS_CONFIG["language"]
-        self._timeout = TTS_CONFIG["remote_timeout"]
+        self._target = TTS.remote_target
+        self._language = TTS.language
+        self._timeout = TTS.remote_timeout
         self._channel: grpc.aio.Channel | None = None
         self._stub: tts_service_pb2_grpc.TTSServiceStub | None = None
 

@@ -19,7 +19,7 @@ import grpc
 from grpc_gen import stt_service_pb2 as stt_pb
 from grpc_gen import stt_service_pb2_grpc
 
-from config import ASR_CONFIG
+from config import ASR
 from providers.asr import ASRProvider, register_asr_provider
 
 logger = logging.getLogger("open-voice-api.asr.remote")
@@ -31,9 +31,9 @@ class RemoteASR(ASRProvider):
     provider_name = "remote"
 
     def __init__(self):
-        self._target = ASR_CONFIG["remote_target"]
-        self._timeout = ASR_CONFIG["remote_timeout"]
-        self._language = ASR_CONFIG.get("language", "pt")
+        self._target = ASR.remote_target
+        self._timeout = ASR.remote_timeout
+        self._language = ASR.language
         self._channel: grpc.aio.Channel | None = None
         self._stub: stt_service_pb2_grpc.STTServiceStub | None = None
         self._streams: dict[str, _StreamingSession] = {}
@@ -98,7 +98,7 @@ class RemoteASR(ASRProvider):
 
     @property
     def supports_streaming(self) -> bool:
-        return ASR_CONFIG["remote_streaming"]
+        return ASR.remote_streaming
 
     async def start_stream(self, stream_id: str) -> None:
         if not self._stub:
