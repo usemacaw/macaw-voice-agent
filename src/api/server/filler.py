@@ -43,6 +43,7 @@ _MEMORY_FILLERS = [
     "Deixa eu verificar, um momento.",
     "Vou checar, aguarde.",
     "Um momento, vou lembrar.",
+    "Só um instante, vou verificar.",
 ]
 
 _GENERIC_FILLERS = [
@@ -55,7 +56,8 @@ _GENERIC_FILLERS = [
 def build_dynamic_filler(tool_name: str, arguments_json: str) -> str:
     """Build a contextual filler phrase based on tool name and arguments."""
     try:
-        args = json.loads(arguments_json) if arguments_json else {}
+        parsed = json.loads(arguments_json) if arguments_json else {}
+        args = parsed if isinstance(parsed, dict) else {}
     except (json.JSONDecodeError, TypeError):
         args = {}
 

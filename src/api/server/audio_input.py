@@ -18,7 +18,7 @@ import numpy as np
 
 from audio.codec import INTERNAL_SAMPLE_RATE, SAMPLE_WIDTH
 from audio.vad import VADProcessor
-from config import VAD
+from config import STREAMING, VAD
 from protocol import events
 from protocol.models import ContentPart, ConversationItem
 from providers.admission import ADMISSION
@@ -89,6 +89,12 @@ class AudioInputHandler:
         self._barge_in_count = 0
         self._response_metrics: dict[str, object] = {}
 
+        # Echo suppression: when a response is active (TTS playing),
+        # require higher RMS to accept speech as real user input.
+        # This allows barge-in (loud direct speech) but rejects echo
+        # (quieter reflected audio from speakers).
+        self._response_active = False
+
         # Background tasks (fire-and-forget from VAD callbacks)
         self._background_tasks: set[asyncio.Task] = set()
 
@@ -105,6 +111,19 @@ class AudioInputHandler:
     @property
     def barge_in_count(self) -> int:
         return self._barge_in_count
+
+    @property
+    def has_active_asr_stream(self) -> bool:
+        """Whether an ASR streaming session is currently active."""
+        return self._asr_stream_id is not None
+
+    @property
+    def response_active(self) -> bool:
+        return self._response_active
+
+    @response_active.setter
+    def response_active(self, value: bool) -> None:
+        self._response_active = value
 
     @property
     def response_metrics(self) -> dict[str, object]:
@@ -146,7 +165,6 @@ class AudioInputHandler:
             if partial and partial != self._last_partial:
                 now = time.perf_counter()
                 # Rate limit partials
-                from config import STREAMING
                 min_interval = STREAMING.partial_interval_ms / 1000
                 if now - self._last_partial_time >= min_interval:
                     self._last_partial = partial
@@ -235,11 +253,18 @@ class AudioInputHandler:
 
         rms = self._compute_rms(speech_audio)
 
-        min_rms = VAD.min_speech_rms
+        # During active response (TTS playing), require higher RMS to distinguish
+        # real user speech (barge-in) from echo/feedback captured by the mic.
+        # Echo typically has 2-4x lower RMS than direct mic speech.
+        if self._response_active:
+            min_rms = max(VAD.min_speech_rms, 1500)
+        else:
+            min_rms = VAD.min_speech_rms
         if rms < min_rms:
             logger.debug(
                 f"[{self._session_id[:8]}] VAD speech_stopped DISCARDED: rms={rms:.0f} < {min_rms} "
-                f"(likely noise/echo), {speech_duration_ms:.0f}ms, item={item_id[:12]}"
+                f"(likely noise/echo, response_active={self._response_active}), "
+                f"{speech_duration_ms:.0f}ms, item={item_id[:12]}"
             )
             async with self._asr_lock:
                 if self._asr_stream_id == item_id:

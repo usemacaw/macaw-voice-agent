@@ -119,6 +119,10 @@ class SlowLLM:
     last_ttft_ms: float = 0.0
     last_stream_total_ms: float = 0.0
 
+    def get_last_timing(self):
+        from providers.llm import LLMStreamTiming
+        return LLMStreamTiming(ttft_ms=self.last_ttft_ms, total_ms=self.last_stream_total_ms)
+
     async def generate_stream(self, messages, system="", tools=None,
                               temperature=0.8, max_tokens=1024):
         for chunk in ["Hello", " ", "world", "!"]:
@@ -155,6 +159,10 @@ class ToolCallingLLM:
     last_ttft_ms: float = 0.0
     last_stream_total_ms: float = 0.0
     _call_count: int = 0
+
+    def get_last_timing(self):
+        from providers.llm import LLMStreamTiming
+        return LLMStreamTiming(ttft_ms=self.last_ttft_ms, total_ms=self.last_stream_total_ms)
 
     async def generate_stream(self, messages, system="", tools=None,
                               temperature=0.8, max_tokens=1024):
@@ -357,6 +365,10 @@ class TestCancellationFences:
             last_ttft_ms: float = 0.0
             last_stream_total_ms: float = 0.0
             _call_count = 0
+
+            def get_last_timing(self):
+                from providers.llm import LLMStreamTiming
+                return LLMStreamTiming(ttft_ms=self.last_ttft_ms, total_ms=self.last_stream_total_ms)
 
             async def generate_stream(self, messages, system="", tools=None,
                                       temperature=0.8, max_tokens=1024):

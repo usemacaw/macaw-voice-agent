@@ -225,9 +225,10 @@ class SentencePipeline:
                                 f"First sentence in {self._metrics.first_sentence_latency_ms:.0f}ms"
                             )
         finally:
-            # Capture LLM-level timing from the provider
-            self._metrics.llm_ttft_ms = self._llm.last_ttft_ms
-            self._metrics.llm_total_ms = self._llm.last_stream_total_ms
+            # Capture LLM-level timing from the provider (snapshot)
+            timing = self._llm.get_last_timing()
+            self._metrics.llm_ttft_ms = timing.ttft_ms
+            self._metrics.llm_total_ms = timing.total_ms
             await queue.put(None)
 
     async def _tts_worker(

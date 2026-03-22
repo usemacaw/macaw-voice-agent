@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Replaced untyped `dict[str, object]` metrics with `ResponseMetrics` dataclass (`protocol/metrics.py`) — eliminates silent typos, provides IDE autocomplete, and documents all metric fields with types
+- Replaced `**kwargs` forwarding in `ResponseRunner._run_audio_response()` with explicit typed signature — typos now caught at type-check time instead of runtime
+- Introduced `ToolResponseContext` parameter object to replace 17 keyword-only params in `run_with_tools()` — improves testability and readability
+- Fixed encapsulation violation: `session.py` no longer accesses private `_asr_stream_id`; uses new `has_active_asr_stream` property instead
+- Moved inline `from config import STREAMING` in hot path (`audio_input.py:feed_asr_chunk`) to module-level import
+- LLM timing metrics now accessed via `get_last_timing()` snapshot instead of mutable class attributes — eliminates race condition when multiple sessions share a single LLMProvider instance
+- Unified `response.done` lifecycle ownership: `ResponseRunner` is now the single emitter of `response.done` and `macaw.metrics` for ALL response paths (text, audio, tools) — eliminates ambiguity about which module owns the lifecycle event
+
+### Added
+- 221 new tests covering previously untested modules: `test_response_strategy.py` (strategy selection, SLO targets, tool merging), `test_context_builder.py` (message building, windowing, tool pairs), `test_admission.py` (semaphore concurrency, timeout, metrics), `test_filler.py` (dynamic phrases, TTS integration, Portuguese accents), `test_response_metrics.py` (typed metrics, to_dict filtering, merge_prior), `test_tool_engine.py` (tool parsing, server-side execution, filler coordination)
+
+### Changed (prior)
 - Decomposed `ResponseRunner` god object (809→374 LOC): extracted `server/response/audio_response.py`, `server/response/text_response.py`, `server/response/tool_response.py` — each response path is now an independent, testable module
 - Extracted `HealthTracker` class into `common/grpc_server.py`: eliminates copy-pasted health tracking logic duplicated across STT, TTS, and LLM servers (~60 LOC x 3)
 - Extracted `configure_logging()` into `common/grpc_server.py`: eliminates duplicated `_configure_logging()` in each microservice

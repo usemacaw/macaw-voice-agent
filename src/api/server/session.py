@@ -124,7 +124,7 @@ class RealtimeSession:
         self._last_metrics_log = time.monotonic()
 
         # Per-response observability metrics (reset at each response start)
-        self._response_metrics: dict[str, object] = {}
+        self._response_metrics: dict[str, object] = {}  # populated by AudioInputHandler
 
         # Session-level counters for observability
         self._session_start = time.perf_counter()
@@ -244,7 +244,7 @@ class RealtimeSession:
             events.conversation_item_created("", prev_id, item)
         )
 
-        self._response_metrics["early_trigger_words"] = stable_count
+        self._response_metrics["early_trigger_words"] = stable_count  # merged into ResponseMetrics
         self._response_metrics["early_trigger_partial"] = partial[:80]
         await self._start_response()
 
@@ -428,7 +428,7 @@ class RealtimeSession:
                 f"appends={self._audio_append_count}, "
                 f"pcm_bytes={self._audio_bytes_received} ({audio_duration_ms:.0f}ms), "
                 f"vad=[{vad_status}], "
-                f"asr_stream={self._audio_input._asr_stream_id is not None}, "
+                f"asr_stream={self._audio_input.has_active_asr_stream}, "
                 f"items={len(self._store.items)}"
             )
             self._last_metrics_log = now
@@ -624,9 +624,14 @@ class RealtimeSession:
             barge_in_count=self._audio_input.barge_in_count,
         )
 
-        await runner.run(response_id, ctx, prior_metrics)
+        # Echo suppression: raise RMS threshold while response is active
+        self._audio_input.response_active = True
+        try:
+            await runner.run(response_id, ctx, prior_metrics)
+        finally:
+            self._audio_input.response_active = False
 
-        self._audio_input.response_metrics = runner.metrics
+        self._audio_input.response_metrics = runner.metrics.to_dict()
 
     # Handler dispatch map
     _HANDLER_MAP: dict[str, str] = {

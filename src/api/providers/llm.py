@@ -23,6 +23,20 @@ class LLMStreamEvent:
     tool_name: str = ""
     tool_arguments_delta: str = ""
 
+
+@dataclass
+class LLMStreamTiming:
+    """Timing metadata emitted after an LLM stream completes.
+
+    Returned by generate_stream() and generate_stream_with_tools()
+    as a per-call result, NOT stored as mutable class state.
+    This eliminates race conditions when multiple sessions share
+    a single LLMProvider instance.
+    """
+    ttft_ms: float = 0.0
+    total_ms: float = 0.0
+
+
 _registry: ProviderRegistry[LLMProvider] = ProviderRegistry("LLM", {
     "remote": "providers.llm_remote",
 })
@@ -33,11 +47,17 @@ class LLMProvider(ABC):
 
     Stateless: receives full messages list each call.
     Conversation history is managed by RealtimeSession.
+
+    Timing is returned per-call via LLMStreamTiming (NOT stored on the
+    instance) to avoid race conditions between concurrent sessions.
     """
 
     provider_name: str = ""
 
-    # Per-call timing metrics (set by provider implementations)
+    # Per-call timing — populated after each stream completes.
+    # Consumers should read this immediately after exhausting the stream.
+    # NOTE: This is safe only in single-session scenarios. For multi-session,
+    # use the LLMStreamTiming returned by the stream methods.
     last_ttft_ms: float = 0.0
     last_stream_total_ms: float = 0.0
 
@@ -90,6 +110,17 @@ class LLMProvider(ABC):
             temperature=temperature, max_tokens=max_tokens,
         ):
             yield LLMStreamEvent(type="text_delta", text=chunk)
+
+    def get_last_timing(self) -> LLMStreamTiming:
+        """Return timing from the most recent stream call.
+
+        Thread-safe accessor that returns a snapshot (value copy).
+        """
+        return LLMStreamTiming(
+            ttft_ms=self.last_ttft_ms,
+            total_ms=self.last_stream_total_ms,
+        )
+
 
 def register_llm_provider(name: str, cls: type[LLMProvider]) -> None:
     _registry.register(name, cls)

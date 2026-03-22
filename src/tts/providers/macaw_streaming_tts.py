@@ -8,13 +8,15 @@ Requer GPU NVIDIA com CUDA e PyTorch >= 2.5.1.
 
 Configuração via env vars:
     TTS_PROVIDER=macaw-streaming
-    QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
-    QWEN_TTS_SPEAKER=Ryan
+    QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+    QWEN_TTS_SPEAKER=              # Empty for Base models
     QWEN_TTS_LANGUAGE=Portuguese
-    MACAW_TTS_EMIT_PHASE1=1          # Frames before first emit (1 = ~88ms)
-    MACAW_TTS_EMIT_PHASE2=4          # Frames per chunk in stable phase
-    MACAW_TTS_DECODE_WINDOW=40       # Decoder context window
-    MACAW_TTS_OVERLAP=512            # Crossfade overlap samples
+    QWEN_TTS_REF_AUDIO=            # Path to reference audio for voice cloning
+    QWEN_TTS_REF_TEXT=             # Transcript of reference audio
+    MACAW_TTS_EMIT_PHASE1=1        # Frames before first emit (1 = ~88ms)
+    MACAW_TTS_EMIT_PHASE2=4        # Frames per chunk in stable phase
+    MACAW_TTS_DECODE_WINDOW=40     # Decoder context window
+    MACAW_TTS_OVERLAP=512          # Crossfade overlap samples
 """
 
 from __future__ import annotations
@@ -41,7 +43,11 @@ class MacawStreamingTTS(TTSProvider):
     """TTS provider usando macaw-qwen3-tts-streaming.
 
     Streaming real com CUDA graphs, two-phase latency, e Hann crossfade.
-    Cada chunk contém ~83ms de áudio (Phase 1) ou ~333ms (Phase 2).
+
+    Voice consistency: Uses voice cloning when ref_audio is configured.
+    A voice_clone_prompt is pre-computed once at connect() and reused
+    for ALL synthesize calls, ensuring the same voice across sentences
+    (critical for sentence pipeline which calls TTS per sentence).
 
     Requer GPU NVIDIA com CUDA.
     """
@@ -50,6 +56,7 @@ class MacawStreamingTTS(TTSProvider):
 
     def __init__(self):
         self._model = None
+        self._voice_clone_prompt = None  # Pre-computed for consistent voice
 
         self._model_name = os.getenv(
             "QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
@@ -62,6 +69,14 @@ class MacawStreamingTTS(TTSProvider):
         self._decode_window = int(os.getenv("MACAW_TTS_DECODE_WINDOW", "40"))
         self._overlap = int(os.getenv("MACAW_TTS_OVERLAP", "512"))
 
+        # Voice cloning reference audio (ensures consistent voice across calls)
+        self._ref_audio = os.getenv("QWEN_TTS_REF_AUDIO", "")
+        self._ref_text = os.getenv(
+            "QWEN_TTS_REF_TEXT",
+            "Olá, boa tarde! Meu nome é Sara e estou aqui para ajudar você. "
+            "Posso verificar informações, fazer pesquisas e responder suas dúvidas.",
+        )
+
         # Idioma
         lang_override = os.getenv("QWEN_TTS_LANGUAGE")
         if lang_override:
@@ -72,7 +87,7 @@ class MacawStreamingTTS(TTSProvider):
             self._language = QWEN_LANGUAGE_MAP.get(lang_code, "Portuguese")
 
     async def connect(self) -> None:
-        """Carrega modelo e prepara CUDA graphs.
+        """Carrega modelo, prepara CUDA graphs, e pré-computa voice clone prompt.
 
         🟢 GPU REQUIRED.
         """
@@ -80,7 +95,8 @@ class MacawStreamingTTS(TTSProvider):
 
         logger.info(
             f"Carregando MacawTTS: model={self._model_name}, "
-            f"speaker={self._speaker}, decode_window={self._decode_window}"
+            f"speaker={self._speaker}, ref_audio={self._ref_audio or 'none'}, "
+            f"decode_window={self._decode_window}"
         )
 
         self._model = await run_inference(
@@ -89,26 +105,62 @@ class MacawStreamingTTS(TTSProvider):
             decode_window=self._decode_window,
         )
 
+        # Pre-compute voice clone prompt if ref_audio is configured
+        if self._ref_audio and os.path.isfile(self._ref_audio):
+            logger.info(f"Pre-computing voice clone prompt from: {self._ref_audio}")
+            self._voice_clone_prompt = await run_inference(
+                self._build_voice_clone_prompt
+            )
+            logger.info("Voice clone prompt ready — voice will be consistent across calls")
+        elif self._ref_audio:
+            logger.warning(f"ref_audio not found: {self._ref_audio}, using default voice")
+
         # Warmup com texto dummy para capturar CUDA graphs
         logger.info("MacawStreamingTTS: executando warmup (CUDA graph capture)...")
         await run_inference(self._warmup)
 
         logger.info("MacawStreamingTTS carregado e pronto")
 
+    def _build_voice_clone_prompt(self):
+        """Pre-compute voice clone prompt from reference audio.
+
+        Uses MacawTTS._model which is Qwen3TTSModel (the wrapper with
+        create_voice_clone_prompt). NOT .model which is the inner nn.Module.
+        The prompt is pre-computed ONCE and reused for all TTS calls,
+        ensuring consistent voice across sentences in the pipeline.
+        """
+        # MacawTTS stores the Qwen3TTSModel wrapper as self._model
+        wrapper = self._model._model  # Qwen3TTSModel
+        prompt_items = wrapper.create_voice_clone_prompt(
+            ref_audio=self._ref_audio,
+            ref_text=self._ref_text,
+        )
+        return wrapper._prompt_items_to_voice_clone_prompt(prompt_items)
+
     def _warmup(self) -> None:
         """Executa warmup para capturar CUDA graphs."""
-        for chunk, sr, meta in self._model.stream(
-            "Olá, tudo bem?",
-            language=self._language,
-            speaker=self._speaker,
-        ):
-            pass  # Consume todo o stream para garantir warmup completo
+        if self._voice_clone_prompt is not None:
+            for chunk, sr, meta in self._model.stream_voice_clone(
+                "Olá, tudo bem?",
+                language=self._language,
+                voice_clone_prompt=self._voice_clone_prompt,
+                ref_text=self._ref_text,
+            ):
+                pass
+        else:
+            for chunk, sr, meta in self._model.stream(
+                "Olá, tudo bem?",
+                language=self._language,
+                speaker=self._speaker,
+            ):
+                pass
         logger.info("Warmup concluído")
 
     async def disconnect(self) -> None:
         if self._model is not None:
             del self._model
             self._model = None
+            self._voice_clone_prompt = None
             logger.info("MacawStreamingTTS descarregado")
 
     async def synthesize(self, text: str) -> bytes:
@@ -123,14 +175,8 @@ class MacawStreamingTTS(TTSProvider):
         all_audio = []
 
         def _generate():
-            for chunk, sr, meta in self._model.stream(
-                text,
-                language=self._language,
-                speaker=self._speaker,
-                emit_every_phase1=self._emit_phase1,
-                emit_every_phase2=self._emit_phase2,
-                overlap_samples=self._overlap,
-            ):
+            stream_fn = self._get_stream_fn(text)
+            for chunk, sr, meta in stream_fn():
                 audio_resampled = resample(chunk.astype(np.float32), sr, target_rate)
                 all_audio.append(float32_to_pcm(audio_resampled))
 
@@ -146,9 +192,9 @@ class MacawStreamingTTS(TTSProvider):
 
         🟢 GPU REQUIRED.
 
-        Cada chunk contém áudio real gerado frame-a-frame pelo modelo.
-        Phase 1: ~83ms por chunk (1 frame @ 12Hz)
-        Phase 2: ~333ms por chunk (4 frames @ 12Hz)
+        Voice consistency: When voice_clone_prompt is pre-computed,
+        every call produces the same voice — critical for sentence
+        pipeline which calls TTS per sentence.
         """
         if not text.strip():
             return
@@ -163,15 +209,8 @@ class MacawStreamingTTS(TTSProvider):
         def _stream_to_queue():
             """Roda em thread: streaming generator → queue."""
             try:
-                for chunk, sr, meta in self._model.stream(
-                    text,
-                    language=self._language,
-                    speaker=self._speaker,
-                    emit_every_phase1=self._emit_phase1,
-                    emit_every_phase2=self._emit_phase2,
-                    overlap_samples=self._overlap,
-                ):
-                    # Resample 24kHz → 8kHz e converter para PCM16
+                stream_fn = self._get_stream_fn(text)
+                for chunk, sr, meta in stream_fn():
                     audio_resampled = resample(
                         chunk.astype(np.float32), sr, target_rate
                     )
@@ -198,6 +237,38 @@ class MacawStreamingTTS(TTSProvider):
                 yield item
         finally:
             await asyncio.wrap_future(future)
+
+    def _get_stream_fn(self, text: str):
+        """Return the appropriate stream function (voice clone or regular).
+
+        Returns a zero-arg callable that yields (chunk, sr, meta) tuples.
+        Using voice_clone_prompt ensures consistent voice across all calls.
+        """
+        common_kwargs = dict(
+            emit_every_phase1=self._emit_phase1,
+            emit_every_phase2=self._emit_phase2,
+            overlap_samples=self._overlap,
+        )
+
+        if self._voice_clone_prompt is not None:
+            def _stream():
+                return self._model.stream_voice_clone(
+                    text,
+                    language=self._language,
+                    voice_clone_prompt=self._voice_clone_prompt,
+                    ref_text=self._ref_text,
+                    **common_kwargs,
+                )
+            return _stream
+        else:
+            def _stream():
+                return self._model.stream(
+                    text,
+                    language=self._language,
+                    speaker=self._speaker,
+                    **common_kwargs,
+                )
+            return _stream
 
     @property
     def supports_streaming(self) -> bool:

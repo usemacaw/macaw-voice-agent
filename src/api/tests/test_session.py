@@ -120,6 +120,10 @@ class FakeLLM:
     last_ttft_ms: float = 0.0
     last_stream_total_ms: float = 0.0
 
+    def get_last_timing(self):
+        from providers.llm import LLMStreamTiming
+        return LLMStreamTiming(ttft_ms=self.last_ttft_ms, total_ms=self.last_stream_total_ms)
+
     async def generate_stream(self, messages, system="", tools=None, temperature=0.8, max_tokens=1024):
         for chunk in ["Hello", ", ", "world", "!"]:
             yield chunk
@@ -160,6 +164,13 @@ class FailingASR(FakeASR):
 class FailingLLM:
     """LLM that raises during streaming."""
 
+    last_ttft_ms: float = 0.0
+    last_stream_total_ms: float = 0.0
+
+    def get_last_timing(self):
+        from providers.llm import LLMStreamTiming
+        return LLMStreamTiming(ttft_ms=self.last_ttft_ms, total_ms=self.last_stream_total_ms)
+
     async def generate_stream(self, messages, system="", tools=None, temperature=0.8, max_tokens=1024):
         yield "Start..."
         raise RuntimeError("LLM connection lost")
@@ -181,6 +192,10 @@ class SlowLLM:
 
     last_ttft_ms: float = 0.0
     last_stream_total_ms: float = 0.0
+
+    def get_last_timing(self):
+        from providers.llm import LLMStreamTiming
+        return LLMStreamTiming(ttft_ms=self.last_ttft_ms, total_ms=self.last_stream_total_ms)
 
     async def generate_stream(self, messages, system="", tools=None, temperature=0.8, max_tokens=1024):
         for chunk in ["Hello", " ", "world"]:

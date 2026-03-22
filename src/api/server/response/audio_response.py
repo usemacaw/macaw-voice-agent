@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable
 from audio.codec import encode_audio_for_client
 from pipeline.sentence_pipeline import SentencePipeline
 from protocol import events
+from protocol.metrics import ResponseMetrics
 from protocol.models import ContentPart
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ async def run_audio_response(
     tts: TTSProvider,
     emitter: EventEmitter,
     on_first_audio: Callable[[], None],
-    metrics: dict[str, object],
+    metrics: ResponseMetrics,
 ) -> str:
     """Run LLM->TTS pipeline, stream audio events. Returns full transcript."""
     full_transcript = ""
@@ -80,23 +81,14 @@ async def run_audio_response(
 
     # Capture pipeline metrics
     pm = pipeline.metrics
-    response_audio_s = (pm.audio_chunks_produced * 0.1) if pm.audio_chunks_produced else 0
-    metrics.update({
-        "llm_ttft_ms": round(pm.llm_ttft_ms, 1),
-        "llm_total_ms": round(pm.llm_total_ms, 1),
-        "llm_first_sentence_ms": round(pm.first_sentence_latency_ms, 1),
-        "pipeline_first_audio_ms": round(pm.first_audio_latency_ms, 1),
-        "pipeline_total_ms": round(pm.total_latency_ms, 1),
-        "tts_synth_ms": round(pm.tts_synth_ms, 1),
-        "tts_wait_ms": round(pm.tts_wait_ms, 1),
-        "tts_first_chunk_ms": round(pm.tts_first_chunk_ms, 1),
-        "tts_queue_max_depth": pm.tts_queue_max_depth,
-        "tts_calls": pm.tts_calls,
-        "sentences": pm.sentences_generated,
-        "audio_chunks": pm.audio_chunks_produced,
-        "output_chars": len(full_transcript),
-        "response_audio_ms": round(response_audio_s * 1000, 1),
-    })
+    metrics.llm_ttft_ms = round(pm.llm_ttft_ms, 1)
+    metrics.llm_total_ms = round(pm.llm_total_ms, 1)
+    metrics.llm_first_sentence_ms = round(pm.first_sentence_latency_ms, 1)
+    metrics.pipeline_first_audio_ms = round(pm.first_audio_latency_ms, 1)
+    metrics.tts_synth_ms = round(pm.tts_synth_ms, 1)
+    metrics.tts_wait_ms = round(pm.tts_wait_ms, 1)
+    metrics.tts_first_chunk_ms = round(pm.tts_first_chunk_ms, 1)
+    metrics.output_chars = len(full_transcript)
 
     assistant_item.content[content_index] = ContentPart(
         type="audio", transcript=full_transcript

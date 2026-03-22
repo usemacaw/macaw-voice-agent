@@ -24,10 +24,11 @@ from intelligence.context_builder import ContextBuilder
 from intelligence.response_strategy import select_strategy
 from protocol import events
 from protocol.event_emitter import SlowClientError
+from protocol.metrics import ResponseMetrics
 from protocol.models import ContentPart, ConversationItem
 from server.response.audio_response import run_audio_response
 from server.response.text_response import run_text_response
-from server.response.tool_response import run_with_tools
+from server.response.tool_response import ToolResponseContext, run_with_tools
 
 if TYPE_CHECKING:
     from protocol.event_emitter import EventEmitter
@@ -89,7 +90,7 @@ class ResponseRunner:
         self._context_builder = ContextBuilder(config)
 
         # Populated during run(), read by caller after completion
-        self.metrics: dict[str, object] = {}
+        self.metrics = ResponseMetrics()
 
         # Set by caller, used for E2E latency measurement
         self._speech_stopped_at: float | None = None
@@ -120,20 +121,13 @@ class ResponseRunner:
         assistant_item = None
 
         # Initialize per-response metrics
-        self.metrics = {
-            "response_id": response_id,
-            "turn": ctx.turn_count,
-            "session_duration_s": round(time.perf_counter() - ctx.session_start, 1),
-            "barge_in_count": ctx.barge_in_count,
-            "tools_used": [],
-            "tool_rounds": 0,
-        }
-        for key in (
-            "asr_ms", "speech_ms", "asr_mode", "input_chars", "speech_rms",
-            "vad_silence_wait_ms", "smart_turn_inference_ms", "smart_turn_waits",
-        ):
-            if key in prior_metrics:
-                self.metrics[key] = prior_metrics[key]
+        self.metrics = ResponseMetrics(
+            response_id=response_id,
+            turn=ctx.turn_count,
+            session_duration_s=round(time.perf_counter() - ctx.session_start, 1),
+            barge_in_count=ctx.barge_in_count,
+        )
+        self.metrics.merge_prior(prior_metrics)
 
         logger.info(
             f"[{self._sid[:8]}] RESPONSE START: "
@@ -150,7 +144,7 @@ class ResponseRunner:
                 )
 
             if plan.has_tools:
-                await run_with_tools(
+                tool_ctx = ToolResponseContext(
                     response_id=response_id,
                     messages=messages,
                     system=system,
@@ -169,6 +163,10 @@ class ResponseRunner:
                     on_first_audio=self._record_e2e_latency,
                     capture_llm_timing=self._capture_llm_timing,
                     run_audio_response=self._run_audio_response,
+                )
+                await run_with_tools(tool_ctx)
+                await self._emit_response_done_and_metrics(
+                    response_id, response_start,
                 )
             else:
                 assistant_item = await self._setup_response(
@@ -283,12 +281,42 @@ class ResponseRunner:
 
         return assistant_item
 
-    async def _run_audio_response(self, **kwargs) -> str:
+    async def _run_audio_response(
+        self,
+        *,
+        response_id: str,
+        item_id: str,
+        output_index: int,
+        content_index: int,
+        assistant_item: ConversationItem,
+        messages: list[dict],
+        system: str,
+        temperature: float,
+        max_tokens: int,
+        tools: list[dict] | None,
+        config: SessionConfig,
+        emitter: EventEmitter,
+        on_first_audio: callable,
+        metrics: ResponseMetrics,
+    ) -> str:
         """Delegate to audio_response module."""
         return await run_audio_response(
             llm=self._llm,
             tts=self._tts,
-            **kwargs,
+            response_id=response_id,
+            item_id=item_id,
+            output_index=output_index,
+            content_index=content_index,
+            assistant_item=assistant_item,
+            messages=messages,
+            system=system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            config=config,
+            emitter=emitter,
+            on_first_audio=on_first_audio,
+            metrics=metrics,
         )
 
     async def _finalize_response(
@@ -301,7 +329,7 @@ class ResponseRunner:
         full_transcript: str,
         full_text: str,
     ) -> None:
-        """Emit final response lifecycle events."""
+        """Emit final response lifecycle events for non-tool paths."""
         await self._emitter.emit(
             events.response_content_part_done(
                 "", response_id, assistant_item.id, output_index, content_index,
@@ -314,30 +342,46 @@ class ResponseRunner:
             events.response_output_item_done("", response_id, output_index, assistant_item)
         )
 
+        # Enrich with LLM timing (for non-tool path)
+        if not self.metrics.llm_ttft_ms:
+            timing = self._llm.get_last_timing()
+            self.metrics.llm_ttft_ms = round(timing.ttft_ms, 1)
+            self.metrics.llm_total_ms = round(timing.total_ms, 1)
+        if not self.metrics.output_chars:
+            self.metrics.output_chars = len(full_transcript or full_text)
+
+        await self._emit_response_done_and_metrics(
+            response_id, response_start,
+            output=[assistant_item.to_dict()],
+        )
+
+    async def _emit_response_done_and_metrics(
+        self,
+        response_id: str,
+        response_start: float,
+        output: list[dict] | None = None,
+    ) -> None:
+        """Single owner of response.done + macaw.metrics emission.
+
+        Called by BOTH tool and non-tool paths. This ensures response.done
+        is emitted exactly once per response, eliminating the previous
+        ambiguity where both ResponseRunner and run_with_tools could emit it.
+        """
         response_ms = (time.perf_counter() - response_start) * 1000
         logger.info(
-            f"[{self._sid[:8]}] RESPONSE DONE: {response_ms:.0f}ms, "
-            f"transcript=\"{full_transcript[:60] or full_text[:60]}\""
+            f"[{self._sid[:8]}] RESPONSE DONE: {response_ms:.0f}ms"
         )
         await self._emitter.emit(
             events.response_done(
-                "", response_id, status="completed",
-                output=[assistant_item.to_dict()],
+                "", response_id, status="completed", output=output,
             )
         )
 
-        # Enrich with LLM timing (for non-tool path)
-        if "llm_ttft_ms" not in self.metrics:
-            self.metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
-            self.metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
-        if "output_chars" not in self.metrics:
-            self.metrics["output_chars"] = len(full_transcript or full_text)
-
-        self.metrics["total_ms"] = round(response_ms, 1)
-        self.metrics["backpressure_level"] = self._emitter.pressure_level
-        self.metrics["events_dropped"] = self._emitter.total_drops
+        self.metrics.total_ms = round(response_ms, 1)
+        self.metrics.backpressure_level = self._emitter.pressure_level
+        self.metrics.events_dropped = self._emitter.total_drops
         await self._emitter.emit(
-            events.macaw_metrics(response_id, self.metrics)
+            events.macaw_metrics(response_id, self.metrics.to_dict())
         )
 
     # ------------------------------------------------------------------
@@ -346,21 +390,22 @@ class ResponseRunner:
 
     def _capture_llm_timing(self, tool_round: int) -> None:
         """Capture LLM TTFT and total streaming time."""
+        timing = self._llm.get_last_timing()
         if tool_round == 0:
-            self.metrics["llm_ttft_ms"] = round(self._llm.last_ttft_ms, 1)
-        self.metrics["llm_total_ms"] = round(self._llm.last_stream_total_ms, 1)
+            self.metrics.llm_ttft_ms = round(timing.ttft_ms, 1)
+        self.metrics.llm_total_ms = round(timing.total_ms, 1)
 
     def _record_e2e_latency(self) -> None:
         """Record E2E latency on first audio chunk sent. Check SLO compliance."""
         if self._speech_stopped_at is not None:
             e2e_ms = (time.perf_counter() - self._speech_stopped_at) * 1000
-            self.metrics["e2e_ms"] = round(e2e_ms, 1)
+            self.metrics.e2e_ms = round(e2e_ms, 1)
 
             # SLO compliance
             if self._slo_target_ms > 0:
                 slo_met = e2e_ms <= self._slo_target_ms
-                self.metrics["slo_target_ms"] = self._slo_target_ms
-                self.metrics["slo_met"] = slo_met
+                self.metrics.slo_target_ms = self._slo_target_ms
+                self.metrics.slo_met = slo_met
                 if not slo_met:
                     logger.warning(
                         f"[{self._sid[:8]}] SLO BREACH: e2e={e2e_ms:.0f}ms > "

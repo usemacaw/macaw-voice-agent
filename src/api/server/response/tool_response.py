@@ -12,12 +12,14 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from audio.text_cleaning import clean_for_voice
 from intelligence.tool_engine import ToolExecutionEngine
 from pipeline.sentence_splitter import IncrementalSplitter
 from protocol import events
+from protocol.metrics import ResponseMetrics
 from protocol.models import ContentPart, ConversationItem
 from providers.admission import ADMISSION
 from server.audio_emitter import AudioEmitter
@@ -29,55 +31,70 @@ if TYPE_CHECKING:
     from protocol.models import SessionConfig
     from providers.llm import LLMProvider
     from providers.tts import TTSProvider
-    from server.response.runner import ResponseContext
+    from server.response_runner import ResponseContext
     from tools.registry import ToolRegistry
 
 logger = logging.getLogger("open-voice-api.response-runner.tools")
 
 
-async def run_with_tools(
-    *,
-    response_id: str,
-    messages: list[dict],
-    system: str,
-    temperature: float,
-    max_tokens: int,
-    plan: ResponsePlan,
-    session_id: str,
-    emitter: EventEmitter,
-    llm: LLMProvider,
-    tts: TTSProvider,
-    config: SessionConfig,
-    tool_registry: ToolRegistry | None,
-    context_builder: ContextBuilder,
-    ctx: ResponseContext,
-    metrics: dict[str, object],
-    on_first_audio: Callable[[], None],
-    capture_llm_timing: Callable[[int], None],
-    run_audio_response: Callable,
-) -> None:
+@dataclass
+class ToolResponseContext:
+    """All state needed to run a tool-calling response.
+
+    Replaces 17 keyword-only parameters with a single typed object.
+    """
+
+    response_id: str
+    messages: list[dict]
+    system: str
+    temperature: float
+    max_tokens: int
+    plan: ResponsePlan
+    session_id: str
+    emitter: EventEmitter
+    llm: LLMProvider
+    tts: TTSProvider
+    config: SessionConfig
+    tool_registry: ToolRegistry | None
+    context_builder: ContextBuilder
+    ctx: ResponseContext
+    metrics: ResponseMetrics
+    on_first_audio: Callable[[], None]
+    capture_llm_timing: Callable[[int], None]
+    run_audio_response: Callable
+
+
+async def run_with_tools(tc: ToolResponseContext) -> None:
     """Run response with function calling support."""
-    sid = session_id
+    # Unpack frequently used fields for readability
+    response_id = tc.response_id
+    messages = tc.messages
+    plan = tc.plan
+    sid = tc.session_id
+    emitter = tc.emitter
+    metrics = tc.metrics
+
     await emitter.emit(events.response_created("", response_id))
 
     response_start = time.perf_counter()
     output_index = 0
 
     tool_engine = None
-    if tool_registry:
+    if tc.tool_registry:
         tool_engine = ToolExecutionEngine(
             session_id=sid,
             emitter=emitter,
-            tts=tts,
-            config=config,
-            tool_registry=tool_registry,
+            tts=tc.tts,
+            config=tc.config,
+            tool_registry=tc.tool_registry,
         )
 
+    ctx = tc.ctx
     tools_used = 0
     tool_round = 0
     for tool_round in range(plan.max_rounds + 1):
         allow_tools = plan.tools if tools_used < plan.max_rounds else None
-        round_max_tokens = max_tokens if allow_tools else min(max_tokens, 40)
+        round_max_tokens = tc.max_tokens if allow_tools else min(tc.max_tokens, 40)
 
         # Final round (no tools) + audio: use pipelined LLM->TTS
         use_pipelined = not allow_tools or (tool_round == 0 and not plan.tools)
@@ -90,15 +107,15 @@ async def run_with_tools(
                 response_id=response_id,
                 output_index=output_index,
                 messages=messages,
-                system=system,
-                temperature=temperature,
+                system=tc.system,
+                temperature=tc.temperature,
                 max_tokens=round_max_tokens,
                 emitter=emitter,
-                config=config,
+                config=tc.config,
                 ctx=ctx,
-                on_first_audio=on_first_audio,
+                on_first_audio=tc.on_first_audio,
                 metrics=metrics,
-                run_audio_response=run_audio_response,
+                run_audio_response=tc.run_audio_response,
             )
             break
 
@@ -114,16 +131,16 @@ async def run_with_tools(
                 output_index=output_index,
                 plan=plan,
                 messages=messages,
-                system=system,
-                temperature=temperature,
+                system=tc.system,
+                temperature=tc.temperature,
                 max_tokens=round_max_tokens,
                 allow_tools=allow_tools,
-                llm=llm,
-                tts=tts,
-                config=config,
+                llm=tc.llm,
+                tts=tc.tts,
+                config=tc.config,
                 emitter=emitter,
                 ctx=ctx,
-                on_first_audio=on_first_audio,
+                on_first_audio=tc.on_first_audio,
             )
         )
         saw_tool_call = bool(collected_tool_calls)
@@ -131,14 +148,14 @@ async def run_with_tools(
         # Wait for inline TTS to finish
         if tts_task and not saw_tool_call:
             await tts_task
-            capture_llm_timing(tool_round)
+            tc.capture_llm_timing(tool_round)
             break  # Response done via inline TTS
         elif tts_task:
             if not tts_task.done():
                 await tts_task  # Already signaled None
             output_index += 1  # TTS item already emitted
 
-        capture_llm_timing(tool_round)
+        tc.capture_llm_timing(tool_round)
 
         # No tool calls: emit fallback response if inline TTS didn't run
         collected_text = clean_for_voice(collected_text)
@@ -151,10 +168,10 @@ async def run_with_tools(
                     has_audio=plan.has_audio,
                     sid=sid,
                     emitter=emitter,
-                    tts=tts,
-                    config=config,
+                    tts=tc.tts,
+                    config=tc.config,
                     ctx=ctx,
-                    on_first_audio=on_first_audio,
+                    on_first_audio=tc.on_first_audio,
                 )
             break
 
@@ -162,12 +179,12 @@ async def run_with_tools(
         logger.info(
             f"[{sid[:8]}] Tool round {tool_round}: "
             f"{len(collected_tool_calls)} tool call(s): "
-            f"{[tc['name'] for tc in collected_tool_calls]}"
+            f"{[call['name'] for call in collected_tool_calls]}"
         )
 
         if plan.server_side_tools and tool_engine:
-            for tc in collected_tool_calls:
-                metrics.setdefault("tools_used", []).append(tc["name"])
+            for call in collected_tool_calls:
+                metrics.tools_used.append(call["name"])
 
             result = await tool_engine.execute_server_side(
                 response_id, output_index, collected_tool_calls,
@@ -177,7 +194,7 @@ async def run_with_tools(
             tools_used += 1
 
             async with ctx.state_lock:
-                messages = context_builder.rebuild_after_tool_round(ctx.items)
+                messages = tc.context_builder.rebuild_after_tool_round(ctx.items)
 
             if not result.all_tools_ok:
                 logger.info(
@@ -199,22 +216,15 @@ async def run_with_tools(
 
     response_ms = (time.perf_counter() - response_start) * 1000
     logger.info(
-        f"[{sid[:8]}] RESPONSE DONE (tools): {response_ms:.0f}ms, "
+        f"[{sid[:8]}] Tool response completed: {response_ms:.0f}ms, "
         f"rounds={tool_round + 1}"
     )
-    await emitter.emit(
-        events.response_done("", response_id, status="completed")
-    )
 
-    metrics["total_ms"] = round(response_ms, 1)
-    metrics["tool_rounds"] = tool_round + 1
-    metrics["backpressure_level"] = emitter.pressure_level
-    metrics["events_dropped"] = emitter.total_drops
+    # Populate tool-specific metrics; response.done and macaw.metrics
+    # are emitted by ResponseRunner (single lifecycle owner).
+    metrics.tool_rounds = tool_round + 1
     if tool_engine:
-        metrics["tool_timings"] = tool_engine.tool_timings
-    await emitter.emit(
-        events.macaw_metrics(response_id, metrics)
-    )
+        metrics.tool_timings = tool_engine.tool_timings
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +340,7 @@ async def _emit_tool_response_audio_streamed(
     config: SessionConfig,
     ctx: ResponseContext,
     on_first_audio: Callable[[], None],
-    metrics: dict[str, object],
+    metrics: ResponseMetrics,
     run_audio_response: Callable,
 ) -> None:
     """Final tool round: pipelined LLM->TTS via SentencePipeline."""
