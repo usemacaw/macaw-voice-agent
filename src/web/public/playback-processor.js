@@ -9,11 +9,16 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this._queue = []; // Array of Float32Arrays
     this._queueOffset = 0;
     this._sourceRate = 24000;
+    // Max queue depth: ~500ms of audio at context sample rate.
+    // Prevents unbounded buffering when network bursts deliver many chunks at once.
+    this._maxQueueSamples = Math.floor(sampleRate * 0.5);
+    this._queueSamples = 0;
 
     this.port.onmessage = (e) => {
       if (e.data === "clear") {
         this._queue = [];
         this._queueOffset = 0;
+        this._queueSamples = 0;
         return;
       }
       // e.data is ArrayBuffer of Int16 PCM at 24kHz
@@ -23,11 +28,12 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         float32[i] = pcm16[i] / 32768;
       }
 
+      let resampled;
       // Resample from 24kHz to context sampleRate if needed
       if (sampleRate !== this._sourceRate) {
         const ratio = sampleRate / this._sourceRate;
         const outLen = Math.floor(float32.length * ratio);
-        const resampled = new Float32Array(outLen);
+        resampled = new Float32Array(outLen);
         for (let i = 0; i < outLen; i++) {
           const srcIdx = i / ratio;
           const idx0 = Math.floor(srcIdx);
@@ -35,9 +41,18 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           const frac = srcIdx - idx0;
           resampled[i] = float32[idx0] + (float32[idx1] - float32[idx0]) * frac;
         }
-        this._queue.push(resampled);
       } else {
-        this._queue.push(float32);
+        resampled = float32;
+      }
+
+      this._queue.push(resampled);
+      this._queueSamples += resampled.length;
+
+      // Evict oldest chunks if queue exceeds max depth (~500ms)
+      while (this._queueSamples > this._maxQueueSamples && this._queue.length > 1) {
+        const evicted = this._queue.shift();
+        this._queueSamples -= evicted.length;
+        this._queueOffset = 0;
       }
     };
   }
@@ -61,6 +76,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
 
       written += toCopy;
       this._queueOffset += toCopy;
+      this._queueSamples -= toCopy;
 
       if (this._queueOffset >= current.length) {
         this._queue.shift();

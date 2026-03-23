@@ -171,6 +171,7 @@ class SentencePipeline:
                         first_sub_chunk = False
 
         finally:
+            # Cancel producer and TTS worker
             for task in (producer_task, tts_worker_task):
                 if not task.done():
                     task.cancel()
@@ -181,6 +182,17 @@ class SentencePipeline:
                     except (asyncio.CancelledError, Exception) as e:
                         if not isinstance(e, asyncio.CancelledError):
                             logger.warning(f"Pipeline task cleanup error: {e}")
+
+            # Drain audio queue to prevent residual audio after barge-in
+            drained = 0
+            while not audio_queue.empty():
+                try:
+                    audio_queue.get_nowait()
+                    drained += 1
+                except asyncio.QueueEmpty:
+                    break
+            if drained:
+                logger.debug(f"Pipeline: drained {drained} residual audio items")
 
             self._metrics.total_latency_ms = (time.perf_counter() - start_time) * 1000
             logger.info(

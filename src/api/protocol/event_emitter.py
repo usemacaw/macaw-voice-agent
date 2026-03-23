@@ -25,7 +25,7 @@ from protocol.contract import DROPPABLE_EVENTS
 logger = logging.getLogger("open-voice-api.event-emitter")
 
 
-_SEND_TIMEOUT_S = 5.0
+_SEND_TIMEOUT_S = 1.0
 
 # Transcript deltas are first to be throttled under pressure
 _THROTTLEABLE_EVENTS = frozenset({

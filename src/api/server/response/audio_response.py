@@ -7,6 +7,7 @@ sentences, synthesized via TTS, and streamed as audio deltas.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Callable
 
 from audio.codec import encode_audio_for_client
@@ -55,6 +56,7 @@ async def run_audio_response(
         temperature=temperature,
         max_tokens=max_tokens,
     ):
+        t_enc = time.perf_counter()
         audio_b64 = encode_audio_for_client(
             audio_chunk, config.output_audio_format
         )
@@ -66,6 +68,9 @@ async def run_audio_response(
 
         if not first_audio_sent:
             first_audio_sent = True
+            metrics.encode_send_ms = round(
+                (time.perf_counter() - t_enc) * 1000, 1
+            )
             on_first_audio()
 
         if is_new_sentence and sentence:
@@ -89,6 +94,8 @@ async def run_audio_response(
     metrics.tts_wait_ms = round(pm.tts_wait_ms, 1)
     metrics.tts_first_chunk_ms = round(pm.tts_first_chunk_ms, 1)
     metrics.output_chars = len(full_transcript)
+    metrics.sentences = pm.sentences_generated
+    metrics.audio_chunks = pm.audio_chunks_produced
 
     assistant_item.content[content_index] = ContentPart(
         type="audio", transcript=full_transcript

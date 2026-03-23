@@ -27,9 +27,13 @@ export interface ResponseMetrics {
   // VAD / Speech
   speech_ms?: number;
   speech_rms?: number;
+  vad_silence_wait_ms?: number;
+  smart_turn_inference_ms?: number;
+  smart_turn_waits?: number;
   // ASR
   asr_ms?: number;
   asr_mode?: string;
+  asr_partial_count?: number;
   input_chars?: number;
   // LLM
   llm_ttft_ms?: number;
@@ -38,18 +42,24 @@ export interface ResponseMetrics {
   // TTS
   tts_synth_ms?: number;
   tts_wait_ms?: number;
+  tts_first_chunk_ms?: number;
+  // Encode + Send
+  encode_send_ms?: number;
   // Pipeline
   e2e_ms?: number;
   pipeline_first_audio_ms?: number;
-  pipeline_total_ms?: number;
   sentences?: number;
   audio_chunks?: number;
   output_chars?: number;
-  response_audio_ms?: number;
   // Tools
   tool_rounds?: number;
   tools_used?: string[];
   tool_timings?: ToolTiming[];
+  // Backpressure
+  backpressure_level?: number;
+  events_dropped?: number;
+  // SLO
+  slo_met?: boolean;
   // Total
   total_ms?: number;
 }

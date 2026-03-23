@@ -64,6 +64,10 @@ export function useRealtimeSession() {
   // Track pending user speech item id
   const pendingUserItemRef = useRef<string | null>(null);
 
+  // Batched transcript delta updates — accumulate deltas and flush via rAF
+  const pendingTranscriptRef = useRef<string>("");
+  const rafIdRef = useRef<number | null>(null);
+
   const send = useCallback((event: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(event));
@@ -98,7 +102,7 @@ export function useRealtimeSession() {
               output_audio_format: "pcm16",
               turn_detection: {
                 type: "server_vad",
-                silence_duration_ms: 500,
+                silence_duration_ms: 250,
                 create_response: true,
                 interrupt_response: true,
               },
@@ -180,11 +184,25 @@ export function useRealtimeSession() {
           const id = currentAssistantIdRef.current;
           const textDelta = data.delta as string;
           if (id && textDelta) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === id ? { ...m, text: m.text + textDelta } : m
-              )
-            );
+            // Batch transcript deltas: accumulate and flush once per animation frame
+            // to avoid 100+ React re-renders per response
+            pendingTranscriptRef.current += textDelta;
+            if (rafIdRef.current === null) {
+              rafIdRef.current = requestAnimationFrame(() => {
+                const pending = pendingTranscriptRef.current;
+                pendingTranscriptRef.current = "";
+                rafIdRef.current = null;
+                if (pending) {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === currentAssistantIdRef.current
+                        ? { ...m, text: m.text + pending }
+                        : m
+                    )
+                  );
+                }
+              });
+            }
           }
           break;
         }
@@ -223,9 +241,13 @@ export function useRealtimeSession() {
               // VAD / Speech
               speech_ms: m.speech_ms as number | undefined,
               speech_rms: m.speech_rms as number | undefined,
+              vad_silence_wait_ms: m.vad_silence_wait_ms as number | undefined,
+              smart_turn_inference_ms: m.smart_turn_inference_ms as number | undefined,
+              smart_turn_waits: m.smart_turn_waits as number | undefined,
               // ASR
               asr_ms: m.asr_ms as number | undefined,
               asr_mode: m.asr_mode as string | undefined,
+              asr_partial_count: m.asr_partial_count as number | undefined,
               input_chars: m.input_chars as number | undefined,
               // LLM
               llm_ttft_ms: m.llm_ttft_ms as number | undefined,
@@ -234,18 +256,24 @@ export function useRealtimeSession() {
               // TTS
               tts_synth_ms: m.tts_synth_ms as number | undefined,
               tts_wait_ms: m.tts_wait_ms as number | undefined,
+              tts_first_chunk_ms: m.tts_first_chunk_ms as number | undefined,
+              // Encode + Send
+              encode_send_ms: m.encode_send_ms as number | undefined,
               // Pipeline
               e2e_ms: m.e2e_ms as number | undefined,
               pipeline_first_audio_ms: m.pipeline_first_audio_ms as number | undefined,
-              pipeline_total_ms: m.pipeline_total_ms as number | undefined,
               sentences: m.sentences as number | undefined,
               audio_chunks: m.audio_chunks as number | undefined,
               output_chars: m.output_chars as number | undefined,
-              response_audio_ms: m.response_audio_ms as number | undefined,
               // Tools
               tool_rounds: m.tool_rounds as number | undefined,
               tools_used: m.tools_used as string[] | undefined,
               tool_timings: m.tool_timings as ToolTiming[] | undefined,
+              // Backpressure
+              backpressure_level: m.backpressure_level as number | undefined,
+              events_dropped: m.events_dropped as number | undefined,
+              // SLO
+              slo_met: m.slo_met as boolean | undefined,
               // Total
               total_ms: m.total_ms as number | undefined,
             };
@@ -337,6 +365,11 @@ export function useRealtimeSession() {
 
   const disconnect = useCallback(() => {
     console.log("[OVA] Disconnecting...");
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    pendingTranscriptRef.current = "";
     captureRef.current?.stop();
     playbackRef.current?.stop();
     captureRef.current = null;

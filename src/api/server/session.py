@@ -343,7 +343,11 @@ class RealtimeSession:
         if self._response_task and not self._response_task.done():
             self._response_task.cancel()
             try:
-                await self._response_task
+                await asyncio.wait_for(self._response_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[{self.session_id[:8]}] Response task cleanup timed out after 5s"
+                )
             except asyncio.CancelledError:
                 pass
             except Exception as e:

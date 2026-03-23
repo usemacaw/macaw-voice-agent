@@ -55,6 +55,9 @@ class ResponseMetrics:
     tts_wait_ms: float = 0.0
     tts_first_chunk_ms: float = 0.0
 
+    # Encode + send (first audio chunk)
+    encode_send_ms: float = 0.0
+
     # E2E
     e2e_ms: float = 0.0
     total_ms: float = 0.0
@@ -65,6 +68,8 @@ class ResponseMetrics:
 
     # Output
     output_chars: int = 0
+    sentences: int = 0
+    audio_chunks: int = 0
 
     # Tools
     tools_used: list[str] = field(default_factory=list)

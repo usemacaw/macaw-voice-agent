@@ -72,12 +72,24 @@ _LLM_CONFIG = {
     "max_tokens": _env_int("LLM_MAX_TOKENS", 1024, 1, 100000),
     "temperature": _env_float("LLM_TEMPERATURE", 0.8, 0.0, 2.0),
     "timeout": _env_float("LLM_TIMEOUT", 30.0, 1.0, 300.0),
-    "system_prompt": os.getenv("LLM_SYSTEM_PROMPT", "You are a helpful assistant."),
+    "system_prompt": os.getenv(
+        "LLM_SYSTEM_PROMPT",
+        (
+            "Você é uma assistente de voz prestativa e natural. "
+            "Responda de forma concisa, adequada para fala. "
+            "Use acentuação correta do português (você, não, é, está, cotação). "
+            "NUNCA escreva sem acentos. "
+            "Quando o usuário pedir informações que exijam consulta externa, "
+            "chame a ferramenta diretamente — NUNCA gere texto dizendo que vai pesquisar, "
+            "perguntando se quer que pesquise, ou descrevendo o que faria. "
+            "Aja, não descreva."
+        ),
+    ),
 }
 
 _VAD_CONFIG = {
     "aggressiveness": _env_int("VAD_AGGRESSIVENESS", 3, 0, 3),
-    "silence_threshold_ms": _env_int("VAD_SILENCE_MS", 500, 50, 5000),
+    "silence_threshold_ms": _env_int("VAD_SILENCE_MS", 250, 50, 5000),
     "prefix_padding_ms": _env_int("VAD_PREFIX_PADDING_MS", 300, 0, 5000),
     "min_speech_ms": _env_int("VAD_MIN_SPEECH_MS", 250, 50, 5000),
     "min_speech_rms": _env_int("VAD_MIN_SPEECH_RMS", 500, 0, 50000),
@@ -111,7 +123,7 @@ _SLO_CONFIG = {
 _STREAMING_CONFIG = {
     "enable_early_llm_trigger": os.getenv("STREAMING_EARLY_LLM_TRIGGER", "false").lower() == "true",
     "min_stable_words": _env_int("STREAMING_MIN_STABLE_WORDS", 3, 1, 20),
-    "partial_interval_ms": _env_int("STREAMING_PARTIAL_INTERVAL_MS", 300, 50, 2000),
+    "partial_interval_ms": _env_int("STREAMING_PARTIAL_INTERVAL_MS", 100, 50, 2000),
     "max_partials_per_second": _env_int("STREAMING_MAX_PARTIALS_PER_SEC", 5, 1, 20),
     "correction_threshold": _env_float("STREAMING_CORRECTION_THRESHOLD", 0.5, 0.1, 1.0),
     "min_eager_chars": _env_int("STREAMING_MIN_EAGER_CHARS", 10, 5, 50),

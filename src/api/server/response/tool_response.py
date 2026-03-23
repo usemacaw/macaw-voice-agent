@@ -125,24 +125,34 @@ async def run_with_tools(tc: ToolResponseContext) -> None:
         )
 
         # Stream LLM with optional inline TTS for text deltas
-        collected_text, collected_tool_calls, tts_task, tts_queue = (
-            await _stream_llm_with_inline_tts(
-                response_id=response_id,
-                output_index=output_index,
-                plan=plan,
-                messages=messages,
-                system=tc.system,
-                temperature=tc.temperature,
-                max_tokens=round_max_tokens,
-                allow_tools=allow_tools,
-                llm=tc.llm,
-                tts=tc.tts,
-                config=tc.config,
-                emitter=emitter,
-                ctx=ctx,
-                on_first_audio=tc.on_first_audio,
+        tts_task = None
+        try:
+            collected_text, collected_tool_calls, tts_task, tts_queue = (
+                await _stream_llm_with_inline_tts(
+                    response_id=response_id,
+                    output_index=output_index,
+                    plan=plan,
+                    messages=messages,
+                    system=tc.system,
+                    temperature=tc.temperature,
+                    max_tokens=round_max_tokens,
+                    allow_tools=allow_tools,
+                    llm=tc.llm,
+                    tts=tc.tts,
+                    config=tc.config,
+                    emitter=emitter,
+                    ctx=ctx,
+                    on_first_audio=tc.on_first_audio,
+                )
             )
-        )
+        except asyncio.CancelledError:
+            if tts_task and not tts_task.done():
+                tts_task.cancel()
+                try:
+                    await tts_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
         saw_tool_call = bool(collected_tool_calls)
 
         # Wait for inline TTS to finish

@@ -67,6 +67,7 @@ class WebSocketServer:
             port,
             process_request=self._process_request,
             max_size=16 * 1024 * 1024,
+            compression="deflate",
         )
         if not CONNECTION.api_key:
             logger.warning(

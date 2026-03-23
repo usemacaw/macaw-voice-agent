@@ -8,6 +8,7 @@ Eliminates duplication between inline TTS (tool-calling path) and batch TTS
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING
@@ -17,10 +18,12 @@ from protocol import events
 from protocol.models import ContentPart, ConversationItem
 
 if TYPE_CHECKING:
-    import asyncio
-
     from protocol.event_emitter import EventEmitter
     from providers.tts import TTSProvider
+
+# Timeout waiting for next sentence from queue.
+# Prevents hanging forever if producer is cancelled without sending sentinel.
+_QUEUE_SENTINEL_TIMEOUT_S = 10.0
 
 logger = logging.getLogger("open-voice-api.audio-emitter")
 
@@ -145,7 +148,13 @@ class AudioEmitter:
 
         full_text = ""
         while True:
-            sentence = await queue.get()
+            try:
+                sentence = await asyncio.wait_for(
+                    queue.get(), timeout=_QUEUE_SENTINEL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("TTS queue sentinel timeout, likely cancelled producer")
+                break
             if sentence is None:
                 break
             full_text += (" " if full_text else "") + sentence

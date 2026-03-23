@@ -152,7 +152,7 @@ class TestStreamingConfig:
         from config import STREAMING
         assert STREAMING.enable_early_llm_trigger is False  # Off by default
         assert STREAMING.min_stable_words == 3
-        assert STREAMING.partial_interval_ms == 300
+        assert STREAMING.partial_interval_ms == 100
         assert STREAMING.min_eager_chars == 10
 
 

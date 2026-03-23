@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Reduced VAD silence threshold default from 500ms to 250ms — cuts ~250ms from end-of-speech detection latency
+- Reduced ASR partial transcript interval from 300ms to 100ms — faster streaming partial updates
+- Reduced WebSocket send timeout from 5s to 1s — faster backpressure detection on slow clients
+- Client session config now sends `silence_duration_ms: 250` (was 500) to match server default
+- Batched transcript delta updates in frontend via `requestAnimationFrame` — prevents 100+ React re-renders per response
+
+### Added
+- WebSocket per-message compression (`deflate`) for ~38% bandwidth reduction on audio events
+- Playback queue depth limit (~500ms) in AudioWorklet — prevents unbounded buffering on network bursts
+- Audio queue drain on pipeline cancellation — prevents residual audio after barge-in
+- Explicit TTS task cancellation on barge-in in tool-calling path — prevents zombie TTS tasks
+- Sentinel timeout (10s) in `AudioEmitter.emit_from_queue()` — prevents infinite hang if producer cancelled without sentinel
+- Session cleanup timeout (5s) — prevents indefinite hang on disconnect if response task is stuck
+
+### Changed (prior)
 - Replaced untyped `dict[str, object]` metrics with `ResponseMetrics` dataclass (`protocol/metrics.py`) — eliminates silent typos, provides IDE autocomplete, and documents all metric fields with types
 - Replaced `**kwargs` forwarding in `ResponseRunner._run_audio_response()` with explicit typed signature — typos now caught at type-check time instead of runtime
 - Introduced `ToolResponseContext` parameter object to replace 17 keyword-only params in `run_with_tools()` — improves testability and readability
