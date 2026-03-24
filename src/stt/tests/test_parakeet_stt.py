@@ -168,21 +168,37 @@ class TestParakeetSTTConnect:
         mock_asr = MagicMock()
         mock_asr.models.ASRModel.from_pretrained.return_value = mock_model
 
-        with patch.dict("sys.modules", {
-            "nemo": MagicMock(),
-            "nemo.collections": MagicMock(),
-            "nemo.collections.asr": mock_asr,
-        }):
+        # Mock run_inference para executar sync (evita complexidade de threads)
+        async def fake_run_inference(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        # import X.Y.Z as alias resolve via atributo no modulo pai,
+        # entao precisamos setar a cadeia completa de atributos
+        mock_collections = MagicMock()
+        mock_collections.asr = mock_asr
+        mock_nemo = MagicMock()
+        mock_nemo.collections = mock_collections
+        sys.modules["nemo"] = mock_nemo
+        sys.modules["nemo.collections"] = mock_collections
+        sys.modules["nemo.collections.asr"] = mock_asr
+        try:
             from stt.providers.parakeet_stt import ParakeetSTT
 
             provider = ParakeetSTT()
             provider._device = "cuda:0"
-            await provider.connect()
+
+            with patch("stt.providers.parakeet_stt.run_inference", side_effect=fake_run_inference):
+                await provider.connect()
 
             mock_asr.models.ASRModel.from_pretrained.assert_called_once_with(
                 model_name="nvidia/parakeet-tdt-0.6b-v2",
             )
-            assert provider._model is not None
+            mock_model.to.assert_called_once_with("cuda:0")
+            assert provider._model is mock_model
+        finally:
+            sys.modules.pop("nemo.collections.asr", None)
+            sys.modules.pop("nemo.collections", None)
+            sys.modules.pop("nemo", None)
 
     @pytest.mark.asyncio
     async def test_connect_cpu_skips_to(self):
@@ -192,18 +208,26 @@ class TestParakeetSTTConnect:
         mock_asr = MagicMock()
         mock_asr.models.ASRModel.from_pretrained.return_value = mock_model
 
-        with patch.dict("sys.modules", {
-            "nemo": MagicMock(),
-            "nemo.collections": MagicMock(),
-            "nemo.collections.asr": mock_asr,
-        }):
+        async def fake_run_inference(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        sys.modules["nemo"] = MagicMock()
+        sys.modules["nemo.collections"] = MagicMock()
+        sys.modules["nemo.collections.asr"] = mock_asr
+        try:
             from stt.providers.parakeet_stt import ParakeetSTT
 
             provider = ParakeetSTT()
             provider._device = "cpu"
-            await provider.connect()
+
+            with patch("stt.providers.parakeet_stt.run_inference", side_effect=fake_run_inference):
+                await provider.connect()
 
             mock_model.to.assert_not_called()
+        finally:
+            sys.modules.pop("nemo.collections.asr", None)
+            sys.modules.pop("nemo.collections", None)
+            sys.modules.pop("nemo", None)
 
     @pytest.mark.asyncio
     async def test_disconnect_clears_model(self):
