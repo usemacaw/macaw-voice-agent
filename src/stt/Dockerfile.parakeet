@@ -1,0 +1,104 @@
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockerfile STT Server GPU — NVIDIA Parakeet TDT (NeMo)
+# =============================================================================
+# Build context: src/
+#   docker build -f stt/Dockerfile.parakeet -t stt-server-parakeet .
+#
+# Run:
+#   docker run --gpus all -p 50060:50060 stt-server-parakeet
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Base CUDA + Python
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04 AS base
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-dev \
+    ffmpeg \
+    curl \
+    g++ \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
+
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: Python dependencies
+# ---------------------------------------------------------------------------
+FROM base AS deps
+
+# NeMo ASR toolkit + Parakeet model support
+RUN pip install --no-cache-dir \
+    "nemo_toolkit[asr]==2.3.2" \
+    "numpy<2" \
+    "huggingface-hub>=0.36.0"
+
+# gRPC + utils
+RUN pip install --no-cache-dir \
+    "grpcio>=1.78.0" \
+    "grpcio-health-checking>=1.78.0" \
+    "grpcio-reflection>=1.78.0" \
+    "python-dotenv>=1.0.0" \
+    "scipy>=1.10.0"
+
+# ---------------------------------------------------------------------------
+# Stage 3: Application
+# ---------------------------------------------------------------------------
+FROM deps AS app
+
+WORKDIR /app
+
+# Shared modules
+COPY shared/ ./shared/
+COPY common/ ./common/
+
+# STT providers + server
+COPY stt/ ./stt/
+
+# Pre-download Parakeet model at build time (avoids slow first-run download)
+ENV HF_HOME=/root/.cache/huggingface
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    python3 -c "\
+import logging; logging.getLogger('nemo_logger').setLevel(logging.CRITICAL); \
+import nemo.collections.asr as nemo_asr; \
+nemo_asr.models.ASRModel.from_pretrained(model_name='nvidia/parakeet-tdt-0.6b-v2')" \
+    && cp -r /root/.cache/huggingface /root/.cache/huggingface_copy
+
+# Move cached model to final location (cache mount is not persisted in layer)
+RUN rm -rf /root/.cache/huggingface && mv /root/.cache/huggingface_copy /root/.cache/huggingface
+
+# =============================================================================
+# NVIDIA
+# =============================================================================
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# =============================================================================
+# Environment
+# =============================================================================
+ENV GRPC_HOST=0.0.0.0
+ENV GRPC_PORT=50060
+ENV LOG_LEVEL=INFO
+
+# Parakeet config
+ENV STT_PROVIDER=parakeet
+ENV PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2
+ENV PARAKEET_DEVICE=cuda:0
+
+ENV PYTHONPATH=/app
+
+EXPOSE 50060
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD python3 -c "import grpc; ch=grpc.insecure_channel('localhost:50060'); grpc.channel_ready_future(ch).result(timeout=5)" || exit 1
+
+CMD ["python3", "-m", "stt.server"]

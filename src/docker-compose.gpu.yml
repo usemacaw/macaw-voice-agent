@@ -12,17 +12,14 @@ services:
   stt:
     build:
       context: .
-      dockerfile: stt/Dockerfile.whisper
+      dockerfile: stt/Dockerfile.parakeet
     ports:
       - "50060:50060"
     environment:
-      - STT_PROVIDER=whisper
+      - STT_PROVIDER=parakeet
       - STT_LANGUAGE=pt
-      - WHISPER_MODEL=large-v3-turbo
-      - WHISPER_DEVICE=cuda
-      - WHISPER_COMPUTE_TYPE=int8
-      - WHISPER_BEAM_SIZE=1
-      - WHISPER_VAD_FILTER=true
+      - PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2
+      - PARAKEET_DEVICE=cuda:0
       - LOG_LEVEL=INFO
     deploy:
       resources:
