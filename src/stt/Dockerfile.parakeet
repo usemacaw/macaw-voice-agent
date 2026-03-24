@@ -70,7 +70,7 @@ RUN --mount=type=cache,target=/root/.cache/huggingface \
     python3 -c "\
 import logging; logging.getLogger('nemo_logger').setLevel(logging.CRITICAL); \
 import nemo.collections.asr as nemo_asr; \
-nemo_asr.models.ASRModel.from_pretrained(model_name='nvidia/parakeet-tdt-0.6b-v2')" \
+nemo_asr.models.ASRModel.from_pretrained(model_name='nvidia/parakeet-tdt-0.6b-v3')" \
     && cp -r /root/.cache/huggingface /root/.cache/huggingface_copy
 
 # Move cached model to final location (cache mount is not persisted in layer)
@@ -91,7 +91,7 @@ ENV LOG_LEVEL=INFO
 
 # Parakeet config
 ENV STT_PROVIDER=parakeet
-ENV PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v2
+ENV PARAKEET_MODEL=nvidia/parakeet-tdt-0.6b-v3
 ENV PARAKEET_DEVICE=cuda:0
 
 ENV PYTHONPATH=/app

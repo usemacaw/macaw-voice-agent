@@ -191,7 +191,7 @@ class TestParakeetSTTConnect:
                 await provider.connect()
 
             mock_asr.models.ASRModel.from_pretrained.assert_called_once_with(
-                model_name="nvidia/parakeet-tdt-0.6b-v2",
+                model_name="nvidia/parakeet-tdt-0.6b-v3",
             )
             mock_model.to.assert_called_once_with("cuda:0")
             assert provider._model is mock_model

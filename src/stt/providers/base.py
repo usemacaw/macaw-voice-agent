@@ -172,6 +172,8 @@ _KNOWN_STT_MODULES = {
     "qwen": "stt.providers.qwen_stt",
     "qwen-streaming": "stt.providers.qwen_stt",
     "parakeet": "stt.providers.parakeet_stt",
+    "parakeet-streaming": "stt.providers.parakeet_stt",
+    "qwen-native-streaming": "stt.providers.qwen_streaming_stt",
 }
 
 
