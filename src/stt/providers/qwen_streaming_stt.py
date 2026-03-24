@@ -105,7 +105,7 @@ class QwenNativeStreamingSTT(STTProvider):
             STT_CONFIG.get("language", "pt"), "Portuguese"
         )
         self._chunk_size_sec = float(os.getenv("QWEN_STT_CHUNK_SIZE_SEC", "1.0"))
-        self._max_new_tokens = int(os.getenv("QWEN_STT_MAX_NEW_TOKENS", "64"))
+        self._max_new_tokens = int(os.getenv("QWEN_STT_MAX_NEW_TOKENS", "32"))
         self._prompt_text = ""  # Cached, built once
 
         self._streaming_states: dict[str, _StreamState] = {}
@@ -501,10 +501,12 @@ class QwenNativeStreamingSTT(STTProvider):
         kv = out.past_key_values
         seqs = out.sequences
 
-        # Decode
+        # Decode with early stopping
         torch.cuda.synchronize()
         t_dc = _time.perf_counter()
         n_tok = 0
+        last_tokens = []  # Track last 3 tokens for repetition detection
+        NEWLINE_TOKEN = thinker.config.eos_token_id  # Will also check for \n
         for _ in range(max_tokens - 1):
             with torch.no_grad():
                 out_step = thinker(
@@ -514,10 +516,18 @@ class QwenNativeStreamingSTT(STTProvider):
                 )
             logits = out_step.logits[:, -1, :]
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            tok_id = next_token.item()
             seqs = torch.cat([seqs, next_token], dim=-1)
             kv = out_step.past_key_values
             n_tok += 1
-            if next_token.item() == eos_id:
+
+            # EOS → stop
+            if tok_id == eos_id:
+                break
+
+            # Repetition detection: 3 consecutive same tokens → stop
+            last_tokens.append(tok_id)
+            if len(last_tokens) >= 3 and last_tokens[-1] == last_tokens[-2] == last_tokens[-3]:
                 break
         torch.cuda.synchronize()
         dc_ms = (_time.perf_counter() - t_dc) * 1000
