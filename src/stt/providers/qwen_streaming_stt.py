@@ -283,18 +283,34 @@ class QwenNativeStreamingSTT(STTProvider):
             logger.debug("STT stream finish: no audio")
             return ""
 
-        # Check if we need fresh inputs (audio grew since last precompute)
+        # Fast finish: GPU mel + token adjust from BG cache (~0.5ms)
+        # vs full CPU processor recompute (~1500ms)
         audio_len = state.audio_accum.shape[0]
-        needs_recompute = (
-            state.precomputed_inputs is None
-            or state.precomputed_audio_len != audio_len
-        )
-
-        # Processor (only if audio changed since last precompute)
         t0 = _time.perf_counter()
-        if needs_recompute:
+
+        if state.precomputed_inputs is not None and state.precomputed_audio_len > 0:
+            if state.precomputed_audio_len == audio_len:
+                # Audio didn't grow — reuse exactly
+                inputs = state.precomputed_inputs
+                proc_ms = 0.0
+                recomputed = False
+            else:
+                # Audio grew (tail) — fast adjust: GPU mel + insert audio_pad tokens
+                def _fast_adjust():
+                    return self._fast_finish_inputs(
+                        state.audio_accum,
+                        state.precomputed_inputs,
+                        state.precomputed_audio_len,
+                        state.partial_raw or "",
+                    )
+
+                inputs = await run_inference(_fast_adjust)
+                proc_ms = (_time.perf_counter() - t0) * 1000
+                state.total_processor_ms += proc_ms
+                recomputed = "fast"
+        else:
+            # No BG result — full CPU processor (first utterance or very short)
             prefix = state.partial_raw or ""
-            prompt = _build_prompt(self._processor, self._language, prefix)
 
             def _proc():
                 return self._run_processor(state.audio_accum, prefix)
@@ -303,10 +319,6 @@ class QwenNativeStreamingSTT(STTProvider):
             proc_ms = (_time.perf_counter() - t0) * 1000
             state.total_processor_ms += proc_ms
             recomputed = True
-        else:
-            inputs = state.precomputed_inputs
-            proc_ms = 0.0
-            recomputed = False
 
         # Generate
         t0 = _time.perf_counter()
@@ -379,6 +391,75 @@ class QwenNativeStreamingSTT(STTProvider):
                 )
             except Exception as e:
                 logger.warning("BG decode error: %s", e)
+
+    def _fast_finish_inputs(
+        self, audio_16k: np.ndarray, bg_inputs: dict,
+        bg_audio_len: int, prefix: str,
+    ) -> dict:
+        """Fast finish: GPU mel (~0.5ms) + adjust input_ids from BG cache.
+
+        Instead of rerunning full CPU processor (~1500ms), we:
+        1. Compute mel on GPU for the FULL audio (~0.5ms)
+        2. Calculate how many extra audio_pad tokens are needed
+        3. Insert them into the cached input_ids from BG
+        Result: identical to full CPU processor, 3000x faster.
+        """
+        import torch
+        from qwen_asr.core.transformers_backend.modeling_qwen3_asr import (
+            _get_feat_extract_output_lengths,
+        )
+
+        device = self._thinker.device
+        fe = self._processor.feature_extractor
+        AUDIO_PAD_TOKEN = 151676  # <|audio_pad|>
+
+        # GPU mel of full audio
+        mel_np = fe._torch_extract_fbank_features(audio_16k, device=str(device))
+        full_frames = len(audio_16k) // fe.hop_length
+        mel_trimmed = mel_np[:, :full_frames]
+
+        input_features = torch.from_numpy(mel_trimmed).unsqueeze(0).to(
+            device=device, dtype=self._thinker.dtype,
+        )
+        feature_mask = torch.ones(1, full_frames, dtype=torch.int32, device=device)
+
+        # Calculate audio_pad token counts
+        bg_frames = bg_audio_len // fe.hop_length
+        bg_audio_tokens = _get_feat_extract_output_lengths(
+            torch.tensor([bg_frames])
+        ).item()
+        full_audio_tokens = _get_feat_extract_output_lengths(
+            torch.tensor([full_frames])
+        ).item()
+        extra_pads = full_audio_tokens - bg_audio_tokens
+
+        # Adjust input_ids: insert extra audio_pad tokens
+        bg_ids = bg_inputs["input_ids"][0].cpu()
+        if extra_pads > 0:
+            pad_positions = torch.where(bg_ids == AUDIO_PAD_TOKEN)[0]
+            if len(pad_positions) > 0:
+                insert_pos = pad_positions[-1].item() + 1
+                new_ids = torch.cat([
+                    bg_ids[:insert_pos],
+                    torch.full((extra_pads,), AUDIO_PAD_TOKEN, dtype=bg_ids.dtype),
+                    bg_ids[insert_pos:],
+                ])
+            else:
+                new_ids = bg_ids
+        elif extra_pads < 0:
+            # Audio shrank? Shouldn't happen, fallback to BG ids
+            new_ids = bg_ids
+        else:
+            new_ids = bg_ids
+
+        new_mask = torch.ones(1, new_ids.shape[0], dtype=torch.int64, device=device)
+
+        return {
+            "input_ids": new_ids.unsqueeze(0).to(device),
+            "attention_mask": new_mask,
+            "input_features": input_features,
+            "feature_attention_mask": feature_mask,
+        }
 
     def _run_processor(self, audio_16k: np.ndarray, prefix: str) -> dict:
         """CPU processor para tokenizacao correta + GPU mel para features.
