@@ -2,6 +2,9 @@
  * AudioWorklet processor for audio playback.
  * Receives Int16 PCM 24kHz buffers from main thread,
  * resamples to context rate, and outputs to speakers.
+ *
+ * Anti-stutter: pre-buffers ~150ms before starting playback,
+ * and allows up to 2s queue depth to cover gaps between TTS sentences.
  */
 class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -9,16 +12,22 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this._queue = []; // Array of Float32Arrays
     this._queueOffset = 0;
     this._sourceRate = 24000;
-    // Max queue depth: ~500ms of audio at context sample rate.
-    // Prevents unbounded buffering when network bursts deliver many chunks at once.
-    this._maxQueueSamples = Math.floor(sampleRate * 0.5);
+    // Max queue depth: ~2s of audio (covers gaps between TTS sentences)
+    this._maxQueueSamples = Math.floor(sampleRate * 2.0);
     this._queueSamples = 0;
+    // Pre-buffer: accumulate ~200ms before starting playback
+    // This prevents stutter when first chunks arrive with gaps
+    this._preBufferSamples = Math.floor(sampleRate * 0.2);
+    this._isBuffering = true;
+    this._hasStartedPlaying = false; // Only pre-buffer once per response
 
     this.port.onmessage = (e) => {
       if (e.data === "clear") {
         this._queue = [];
         this._queueOffset = 0;
         this._queueSamples = 0;
+        this._isBuffering = true;
+        this._hasStartedPlaying = false; // Reset on clear (new response)
         return;
       }
       // e.data is ArrayBuffer of Int16 PCM at 24kHz
@@ -48,7 +57,13 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       this._queue.push(resampled);
       this._queueSamples += resampled.length;
 
-      // Evict oldest chunks if queue exceeds max depth (~500ms)
+      // Check if pre-buffer threshold reached (only first time)
+      if (this._isBuffering && this._queueSamples >= this._preBufferSamples) {
+        this._isBuffering = false;
+        this._hasStartedPlaying = true;
+      }
+
+      // Evict oldest chunks if queue exceeds max depth (~2s)
       while (this._queueSamples > this._maxQueueSamples && this._queue.length > 1) {
         const evicted = this._queue.shift();
         this._queueSamples -= evicted.length;
@@ -62,6 +77,15 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     if (!output || !output[0]) return true;
 
     const channel = output[0];
+
+    // Pre-buffering: output silence until enough audio accumulated
+    if (this._isBuffering) {
+      for (let i = 0; i < channel.length; i++) {
+        channel[i] = 0;
+      }
+      return true;
+    }
+
     let written = 0;
 
     while (written < channel.length && this._queue.length > 0) {
@@ -84,10 +108,14 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Fill remaining with silence
+    // Fill remaining with silence (buffer underrun)
     for (let i = written; i < channel.length; i++) {
       channel[i] = 0;
     }
+
+    // Do NOT re-enter pre-buffer mode after playback started.
+    // Silence gaps between sentences are normal and brief (~90ms TTFA).
+    // Re-buffering would add an extra 200ms delay on top of each gap.
 
     return true;
   }

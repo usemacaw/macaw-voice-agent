@@ -219,6 +219,21 @@ export function useRealtimeSession() {
           console.log(`[OVA] Response done: status=${resp?.status}`);
           const id = currentAssistantIdRef.current;
           if (id) {
+            // Flush any pending transcript before marking final
+            // (race condition: transcript_delta may arrive just before response.done)
+            if (pendingTranscriptRef.current) {
+              const pending = pendingTranscriptRef.current;
+              pendingTranscriptRef.current = "";
+              if (rafIdRef.current !== null) {
+                cancelAnimationFrame(rafIdRef.current);
+                rafIdRef.current = null;
+              }
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === id ? { ...m, text: m.text + pending } : m
+                )
+              );
+            }
             updateMessage(id, { isFinal: true });
             currentAssistantIdRef.current = null;
           }

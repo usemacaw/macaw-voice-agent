@@ -269,15 +269,18 @@ class QwenNativeStreamingSTT(STTProvider):
 
         t_finish_start = _time.perf_counter()
 
-        # Wait for bg task
+        # If bg task still running, cancel it instead of waiting
+        # This prevents GPU contention between STT decode and TTS synthesis
         t0 = _time.perf_counter()
         bg_wait_ms = 0.0
         if state.bg_task and not state.bg_task.done():
+            state.bg_task.cancel()
             try:
-                await asyncio.wait_for(state.bg_task, timeout=5.0)
-            except (asyncio.TimeoutError, Exception):
+                await state.bg_task
+            except (asyncio.CancelledError, Exception):
                 pass
-        bg_wait_ms = (_time.perf_counter() - t0) * 1000
+            bg_wait_ms = (_time.perf_counter() - t0) * 1000
+            logger.debug("finish: cancelled bg_task (%.0fms)", bg_wait_ms)
 
         if state.audio_accum.shape[0] == 0:
             logger.debug("STT stream finish: no audio")
