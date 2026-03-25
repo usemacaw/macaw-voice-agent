@@ -103,6 +103,42 @@ class TestOpenAISDK:
         )
         assert len(result.text) >= 0
 
+    def test_transcribe_streaming_sse(self, client):
+        """OpenAI streaming: stream=true returns SSE with transcript.text.delta events."""
+        import httpx
+
+        wav_buf = _make_wav(2.0)
+        wav_bytes = wav_buf.read()
+
+        # Use httpx directly for SSE streaming (OpenAI SDK doesn't expose raw SSE)
+        with httpx.Client(base_url="http://localhost:8766") as http:
+            with http.stream(
+                "POST", "/v1/audio/transcriptions",
+                files={"file": ("test.wav", wav_bytes, "audio/wav")},
+                data={"model": "whisper-1", "stream": "true", "language": "pt"},
+                timeout=60,
+            ) as response:
+                assert response.status_code == 200
+                events = []
+                for line in response.iter_lines():
+                    if line.startswith("data: "):
+                        import json
+                        events.append(json.loads(line[6:]))
+
+                assert len(events) >= 1
+                # Check deltas
+                deltas = [e for e in events if e.get("type") == "transcript.text.delta"]
+                done = [e for e in events if e.get("type") == "transcript.text.done"]
+                assert len(done) == 1, f"Expected 1 done event, got {len(done)}"
+
+                full_text = done[0]["text"]
+                delta_text = "".join(d["delta"] for d in deltas)
+
+                print(f"\n  Deltas: {len(deltas)} events")
+                print(f"  Delta text: {delta_text!r}")
+                print(f"  Done text: {full_text!r}")
+                assert len(full_text) > 0
+
     def test_list_models(self, client):
         models = client.models.list()
         ids = [m.id for m in models.data]

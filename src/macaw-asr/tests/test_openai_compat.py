@@ -7,6 +7,7 @@ Tests use multipart/form-data file upload (same as `curl -F file=@audio.wav`).
 from __future__ import annotations
 
 import io
+import json
 import struct
 import wave
 
@@ -121,6 +122,38 @@ class TestOpenAITranscribe:
         assert "usage" in data
         assert data["usage"]["type"] == "duration"
         assert data["usage"]["seconds"] > 0
+
+    def test_transcribe_streaming_sse(self, client):
+        """OpenAI SSE streaming: data: {type: transcript.text.delta, delta: ...}"""
+        wav = _make_wav_bytes(1.0)
+        with client.stream(
+            "POST", "/v1/audio/transcriptions",
+            files={"file": ("audio.wav", wav, "audio/wav")},
+            data={"model": "mock", "stream": "true"},
+        ) as response:
+            assert response.status_code == 200
+            assert "text/event-stream" in response.headers.get("content-type", "")
+
+            events = []
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    data = json.loads(line[6:])
+                    events.append(data)
+
+            # Must have at least one event
+            assert len(events) >= 1
+
+            # Last event must be transcript.text.done
+            last = events[-1]
+            assert last["type"] == "transcript.text.done"
+            assert "text" in last
+            assert "usage" in last
+
+            # Delta events (if any) must have type transcript.text.delta
+            deltas = [e for e in events if e["type"] == "transcript.text.delta"]
+            for d in deltas:
+                assert "delta" in d
+                assert isinstance(d["delta"], str)
 
     def test_transcribe_auth_header_ignored(self, client):
         """Auth header accepted but not validated (local server)."""

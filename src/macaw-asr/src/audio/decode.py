@@ -67,14 +67,37 @@ def decode_audio(data: bytes, filename: str = "") -> tuple[np.ndarray, int]:
     except Exception:
         pass
 
-    # Try librosa (handles mp3, webm, etc. via ffmpeg)
+    # Try librosa via temp file (handles mp3, webm, etc. via ffmpeg)
+    # librosa/ffmpeg needs a real file for some formats like webm
     try:
         import librosa
-        audio, sr = librosa.load(io.BytesIO(data), sr=None, mono=True)
-        logger.debug("Decoded via librosa: %.1fs @ %dHz", len(audio) / sr, sr)
-        return audio, sr
-    except Exception:
-        pass
+        import tempfile
+        import os
+
+        ext = ""
+        if filename:
+            ext = os.path.splitext(filename)[1]
+        if not ext:
+            # Guess from magic bytes
+            if data[:4] == b'\x1aE\xdf\xa3':
+                ext = ".webm"
+            elif data[:4] == b'ID3\x03' or data[:2] == b'\xff\xfb':
+                ext = ".mp3"
+            else:
+                ext = ".bin"
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+
+        try:
+            audio, sr = librosa.load(tmp_path, sr=None, mono=True)
+            logger.debug("Decoded via librosa: %.1fs @ %dHz", len(audio) / sr, sr)
+            return audio, sr
+        finally:
+            os.unlink(tmp_path)
+    except Exception as e:
+        logger.debug("librosa decode failed: %s", e)
 
     # Last resort: treat as raw PCM16 at 16kHz
     if len(data) % 2 == 0:
