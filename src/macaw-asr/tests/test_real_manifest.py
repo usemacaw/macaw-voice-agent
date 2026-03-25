@@ -14,8 +14,8 @@ class TestModelPaths:
 
     def test_model_dir_slash_to_double_dash(self, tmp_path):
         paths = ModelPaths(home=tmp_path)
-        d = paths.model_dir("Qwen/Qwen3-ASR-0.6B")
-        assert d.name == "Qwen--Qwen3-ASR-0.6B"
+        d = paths.model_dir("org/my-model-v1")
+        assert d.name == "org--my-model-v1"
 
     def test_exists_with_files(self, tmp_path):
         paths = ModelPaths(home=tmp_path)

@@ -1,32 +1,86 @@
 """Fixtures for macaw-asr real GPU tests.
 
-No mocks. All tests run against Qwen/Qwen3-ASR-0.6B on CUDA.
+Model selection follows Ollama's pattern (integration/utils_test.go):
+    MACAW_ASR_TEST_MODEL=qwen pytest tests/         # default
+    MACAW_ASR_TEST_MODEL=whisper pytest tests/       # future
+    MACAW_ASR_TEST_MODEL=parakeet pytest tests/      # future
+
+No mocks. All tests run real inference on GPU.
 """
 
 from __future__ import annotations
+
+import os
 
 import numpy as np
 import pytest
 
 from macaw_asr.config import AudioConfig, EngineConfig, StreamingConfig
+from macaw_asr.models.base import create_model
 from macaw_asr.runner.engine import ASREngine
 
 
-QWEN_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
-DEVICE = "cuda:0"
+# ==================== Model Registry (Ollama pattern) ====================
+# Like Ollama's testModel = os.Getenv("OLLAMA_TEST_MODEL")
+# Each model defines: registry key, HF model ID, default dtype, model sample rate
+
+
+_MODEL_CONFIGS = {
+    "qwen": {
+        "model_name": "qwen",
+        "model_id": "Qwen/Qwen3-ASR-0.6B",
+        "dtype": "bfloat16",
+        "model_sample_rate": 16000,
+    },
+    # Future models:
+    # "whisper": {
+    #     "model_name": "whisper",
+    #     "model_id": "openai/whisper-large-v3",
+    #     "dtype": "float16",
+    #     "model_sample_rate": 16000,
+    # },
+    # "parakeet": {
+    #     "model_name": "parakeet",
+    #     "model_id": "nvidia/parakeet-tdt-0.6b-v2",
+    #     "dtype": "float32",
+    #     "model_sample_rate": 16000,
+    # },
+}
+
+TEST_MODEL = os.getenv("MACAW_ASR_TEST_MODEL", "qwen")
+DEVICE = os.getenv("MACAW_ASR_TEST_DEVICE", "cuda:0")
 INPUT_SR = 8000
-MODEL_SR = 16000
+
+
+def get_test_model_config() -> dict:
+    """Get config dict for the current test model."""
+    if TEST_MODEL not in _MODEL_CONFIGS:
+        available = ", ".join(_MODEL_CONFIGS.keys())
+        raise ValueError(
+            f"Unknown test model '{TEST_MODEL}'. "
+            f"Available: {available}. "
+            f"Set MACAW_ASR_TEST_MODEL env var."
+        )
+    return _MODEL_CONFIGS[TEST_MODEL]
+
+
+# ==================== Config Fixture ====================
 
 
 @pytest.fixture(scope="session")
 def engine_config() -> EngineConfig:
+    """EngineConfig for the test model. Driven by MACAW_ASR_TEST_MODEL env var."""
+    mc = get_test_model_config()
     return EngineConfig(
-        model_name="qwen",
-        model_id=QWEN_MODEL_ID,
+        model_name=mc["model_name"],
+        model_id=mc["model_id"],
         device=DEVICE,
-        dtype="bfloat16",
+        dtype=mc["dtype"],
         language="pt",
-        audio=AudioConfig(input_sample_rate=INPUT_SR, model_sample_rate=MODEL_SR),
+        audio=AudioConfig(
+            input_sample_rate=INPUT_SR,
+            model_sample_rate=mc["model_sample_rate"],
+        ),
         streaming=StreamingConfig(
             chunk_trigger_sec=1.0,
             max_new_tokens=32,
@@ -35,12 +89,15 @@ def engine_config() -> EngineConfig:
     )
 
 
+# ==================== Engine Fixture ====================
+
+
 _engine_instance: ASREngine | None = None
 
 
 @pytest.fixture
 async def engine(engine_config) -> ASREngine:
-    """Shared engine. Starts once, reused across tests via module-level cache."""
+    """Shared engine. Starts once, reused across tests."""
     global _engine_instance
     if _engine_instance is None or not _engine_instance.is_started:
         _engine_instance = ASREngine(engine_config)
@@ -48,7 +105,24 @@ async def engine(engine_config) -> ASREngine:
     return _engine_instance
 
 
-# ==================== Audio generators ====================
+# ==================== Model Fixture (for direct model tests) ====================
+
+
+_model_instance = None
+
+
+@pytest.fixture(scope="module")
+def model(engine_config):
+    """Loaded ASRModel instance. Reused within a test module."""
+    global _model_instance
+    if _model_instance is None:
+        _model_instance = create_model(engine_config.model_name)
+        _model_instance.load(engine_config)
+        _model_instance.warmup()
+    return _model_instance
+
+
+# ==================== Audio Generators ====================
 
 
 def make_pcm(duration_sec: float, freq: float = 440.0, sr: int = INPUT_SR) -> bytes:

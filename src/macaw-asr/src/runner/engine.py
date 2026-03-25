@@ -183,7 +183,7 @@ class ASREngine:
 
     def _create_strategy(self) -> GreedyWithEarlyStopping:
         return GreedyWithEarlyStopping(
-            eos_token_id=0,
+            eos_token_id=self._model.eos_token_id,
             repetition_window=self._config.streaming.repetition_window,
         )
 

@@ -20,8 +20,7 @@ from typing import Any
 import numpy as np
 
 from macaw_asr._executor import run_in_executor
-from macaw_asr.audio.accumulator import ChunkAccumulator
-from macaw_asr.audio.preprocessing import AudioPreprocessor
+from macaw_asr.audio.preprocessing import AudioPreprocessor, pcm_to_float32, resample
 from macaw_asr.config import EngineConfig
 from macaw_asr.decode.postprocess import clean_asr_text
 from macaw_asr.decode.strategies import DecodeStrategy
@@ -63,10 +62,15 @@ class StreamingSession:
         self._config = config
         self._executor = executor
 
-        trigger_samples = int(
-            config.streaming.chunk_trigger_sec * config.audio.model_sample_rate
+        self._input_rate = config.audio.input_sample_rate
+        self._model_rate = config.audio.model_sample_rate
+        # Accumulate raw PCM float32 at input rate — resample only when used
+        self._raw_buffer: list[np.ndarray] = []
+        self._raw_samples: int = 0
+        self._trigger_samples = int(
+            config.streaming.chunk_trigger_sec * self._input_rate
         )
-        self._accumulator = ChunkAccumulator(trigger_samples)
+        self._samples_since_trigger: int = 0
         self._metrics = SessionMetrics()
 
         # Background precomputation cache
@@ -96,19 +100,31 @@ class StreamingSession:
         return self._metrics
 
     async def push_audio(self, pcm_chunk: bytes) -> str:
-        """Push an audio chunk. Returns current best transcription."""
+        """Push an audio chunk. Returns current best transcription.
+
+        Accumulates raw PCM at input_sample_rate. Resampling happens
+        only when audio is used (background compute or finish), so that
+        the full signal is resampled as one contiguous block — producing
+        identical results to batch mode.
+        """
         if not pcm_chunk:
             return self._text
 
         t0 = _time.perf_counter()
-        float_chunk = self._preprocessor.process(pcm_chunk)
+        float_chunk = pcm_to_float32(pcm_chunk)
         self._metrics.total_resample_ms += (_time.perf_counter() - t0) * 1000
 
-        should_trigger = self._accumulator.push(float_chunk)
+        self._raw_buffer.append(float_chunk)
+        self._raw_samples += len(float_chunk)
+        self._samples_since_trigger += len(float_chunk)
+
+        should_trigger = self._samples_since_trigger >= self._trigger_samples
+        if should_trigger:
+            self._samples_since_trigger = 0
 
         if should_trigger and self._config.streaming.enable_background_compute:
             if self._bg_task is None or self._bg_task.done():
-                snapshot = self._accumulator.snapshot()
+                snapshot = self._get_resampled_audio()
                 self._bg_task = asyncio.create_task(
                     self._background_precompute_and_decode(snapshot)
                 )
@@ -122,11 +138,12 @@ class StreamingSession:
         # Cancel background task (prevents GPU contention)
         bg_wait_ms = await self._cancel_bg_task()
 
-        if self._accumulator.is_empty:
+        if self._raw_samples == 0:
             logger.debug("Session finish: no audio (%s)", self._session_id[:8])
             return ""
 
-        audio = self._accumulator.get_all()
+        # Resample full audio as one block (identical to batch path)
+        audio = self._get_resampled_audio()
         audio_len = len(audio)
 
         # Try fast finish, fall back to full recompute
@@ -164,6 +181,20 @@ class StreamingSession:
         await self._cancel_bg_task()
 
     # ==================== Internal ====================
+
+    def _get_resampled_audio(self) -> np.ndarray:
+        """Concatenate all raw PCM chunks and resample as one block.
+
+        This ensures streaming produces identical audio to batch mode,
+        avoiding per-chunk resample artifacts at chunk boundaries.
+        """
+        if not self._raw_buffer:
+            return np.zeros(0, dtype=np.float32)
+        raw = np.concatenate(self._raw_buffer)
+        t0 = _time.perf_counter()
+        resampled = resample(raw, self._input_rate, self._model_rate)
+        self._metrics.total_resample_ms += (_time.perf_counter() - t0) * 1000
+        return resampled
 
     async def _prepare_finish_inputs(
         self, audio: np.ndarray, audio_len: int
