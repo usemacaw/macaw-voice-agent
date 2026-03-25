@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macaw-asr"
+version = "0.1.0"
+description = "Self-contained ASR engine with pluggable models and shared inference optimizations"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+qwen = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "qwen-asr",
+]
+scipy = ["scipy>=1.10.0"]
+hf = ["huggingface_hub>=0.20.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+all = ["macaw-asr[qwen,scipy,hf,dev]"]
+
+[project.scripts]
+macaw-asr = "macaw_asr.cmd.cli:main"
+
+[tool.setuptools]
+packages = [
+    "macaw_asr",
+    "macaw_asr.audio",
+    "macaw_asr.models",
+    "macaw_asr.decode",
+    "macaw_asr.runner",
+    "macaw_asr.api",
+    "macaw_asr.server",
+    "macaw_asr.manifest",
+    "macaw_asr.cmd",
+]
+
+[tool.setuptools.package-dir]
+"macaw_asr" = "src"
+"macaw_asr.audio" = "src/audio"
+"macaw_asr.models" = "src/models"
+"macaw_asr.decode" = "src/decode"
+"macaw_asr.runner" = "src/runner"
+"macaw_asr.api" = "src/api"
+"macaw_asr.server" = "src/server"
+"macaw_asr.manifest" = "src/manifest"
+"macaw_asr.cmd" = "src/cmd"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
