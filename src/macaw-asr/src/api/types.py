@@ -1,153 +1,153 @@
-"""API types for macaw-asr.
+"""API types for macaw-asr (Pydantic models).
 
-Request/response types shared between client and server.
-Equivalent to Ollama's api/types.go — single source of truth
-for the wire format.
+Wire format matches Ollama conventions:
+- Durations in nanoseconds (int)
+- Errors as {"error": "message"}
+- Streaming via NDJSON (application/x-ndjson)
+- Optional `stream` parameter (default: false for transcribe)
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-
-# ==================== Model Management ====================
-
-
-@dataclass
-class PullRequest:
-    """Request to download a model."""
-
-    model: str
-    """Model identifier (e.g. 'Qwen/Qwen3-ASR-0.6B')."""
+from pydantic import BaseModel, Field
 
 
-@dataclass
-class PullResponse:
-    """Progress update during model download."""
-
-    status: str
-    """Current status ('downloading', 'verifying', 'complete', 'error')."""
-
-    digest: str = ""
-    """Content digest (sha256)."""
-
-    total: int = 0
-    """Total bytes to download."""
-
-    completed: int = 0
-    """Bytes downloaded so far."""
+# ==================== Transcribe (Ollama /api/generate equivalent) ====================
 
 
-@dataclass
-class ModelInfo:
-    """Information about a locally available model."""
+# ==================== Model Info (used by manifest registry) ====================
 
-    name: str
-    """Registry key (e.g. 'qwen')."""
 
-    model_id: str
-    """HuggingFace model ID or local path."""
-
+class ModelInfo(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    name: str = ""
+    model_id: str = ""
     size_bytes: int = 0
-    """Total size on disk."""
-
     family: str = ""
-    """Model family (e.g. 'qwen3-asr', 'whisper')."""
-
     parameters: str = ""
-    """Parameter count (e.g. '0.6B')."""
 
 
-# ==================== Transcription ====================
+# ==================== Transcribe (Ollama /api/generate equivalent) ====================
 
 
-@dataclass
-class TranscribeRequest:
-    """Request for batch transcription."""
-
+class TranscribeRequest(BaseModel):
     model: str = ""
-    """Model to use. Empty = default loaded model."""
-
-    audio: bytes = b""
-    """PCM 16-bit audio at input_sample_rate."""
-
+    audio: str = ""  # base64-encoded PCM16
     language: str = ""
-    """ISO-639-1 language code. Empty = model default."""
+    stream: bool = False
+    keep_alive: str = ""  # "5m", "10s", "0" = unload immediately
+    options: dict[str, Any] = Field(default_factory=dict)
 
-    options: dict[str, Any] = field(default_factory=dict)
-    """Model-specific options (temperature, etc.)."""
 
-
-@dataclass
-class TranscribeResponse:
-    """Result of a transcription."""
-
+class TranscribeResponse(BaseModel):
+    model: str = ""
+    created_at: str = ""
     text: str = ""
-    """Transcribed text."""
+    done: bool = False
+    total_duration: int = 0  # nanoseconds
+    load_duration: int = 0
+    prompt_eval_duration: int = 0  # prepare_inputs time
+    eval_count: int = 0  # tokens generated
+    eval_duration: int = 0  # decode time
 
+
+# ==================== Show (Ollama /api/show) ====================
+
+
+class ShowRequest(BaseModel):
+    model: str
+
+
+class ShowResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}
+    model_info: dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+# ==================== Pull (Ollama /api/pull) ====================
+
+
+class PullRequest(BaseModel):
+    model: str
+    stream: bool = True
+
+
+class PullResponse(BaseModel):
+    status: str = ""
+    digest: str = ""
+    total: int = 0
+    completed: int = 0
+
+
+# ==================== Delete (Ollama /api/delete) ====================
+
+
+class DeleteRequest(BaseModel):
+    model: str
+
+
+# ==================== List Models (Ollama /api/tags) ====================
+
+
+class ModelDetails(BaseModel):
+    family: str = ""
+    parameter_size: str = ""
+    quantization_level: str = ""
+
+
+class ModelEntry(BaseModel):
+    name: str = ""
     model: str = ""
-    """Model that performed the transcription."""
-
-    total_duration_ms: float = 0.0
-    """Total time including preprocessing."""
-
-    load_duration_ms: float = 0.0
-    """Time spent loading model (0 if already loaded)."""
-
-    preprocess_duration_ms: float = 0.0
-    """Audio preprocessing time."""
-
-    inference_duration_ms: float = 0.0
-    """Model inference time."""
-
-    tokens: int = 0
-    """Tokens generated."""
+    size: int = 0
+    details: ModelDetails = Field(default_factory=ModelDetails)
 
 
-# ==================== Streaming ====================
+class ListResponse(BaseModel):
+    models: list[ModelEntry] = Field(default_factory=list)
 
 
-@dataclass
-class StreamStartRequest:
-    """Request to start a streaming session."""
+# ==================== List Running (Ollama /api/ps) ====================
 
+
+class RunningModel(BaseModel):
+    name: str = ""
     model: str = ""
-    """Model to use."""
+    size: int = 0
+    size_vram: int = 0
+    expires_at: str = ""
 
-    session_id: str = ""
-    """Client-provided session ID. Auto-generated if empty."""
 
+class PsResponse(BaseModel):
+    models: list[RunningModel] = Field(default_factory=list)
+
+
+# ==================== Version (Ollama /api/version) ====================
+
+
+class VersionResponse(BaseModel):
+    version: str = ""
+
+
+# ==================== Stream Start/Push/Finish ====================
+
+
+class StreamStartRequest(BaseModel):
+    model: str = ""
     language: str = ""
-    """ISO-639-1 language code."""
-
-
-@dataclass
-class StreamChunk:
-    """Audio chunk for streaming transcription."""
-
     session_id: str = ""
-    """Session to push audio to."""
 
-    audio: bytes = b""
-    """PCM 16-bit audio chunk."""
 
+class StreamPushRequest(BaseModel):
+    session_id: str
+    audio: str = ""  # base64
     end_of_stream: bool = False
-    """If True, finish the session and return final text."""
 
 
-@dataclass
-class StreamFinishResponse:
-    """Final result of a streaming session."""
-
+class StreamFinishResponse(BaseModel):
     text: str = ""
-    """Final transcribed text."""
-
     session_id: str = ""
     model: str = ""
-
-    total_duration_ms: float = 0.0
-    preprocess_duration_ms: float = 0.0
-    inference_duration_ms: float = 0.0
-    bg_decode_count: int = 0
-    tokens: int = 0
+    total_duration: int = 0

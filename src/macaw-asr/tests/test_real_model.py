@@ -12,6 +12,13 @@ import numpy as np
 import pytest
 
 from macaw_asr.decode.strategies import GreedyWithEarlyStopping
+from macaw_asr.models.base import (
+    TIMING_DECODE_MS,
+    TIMING_DECODE_PER_TOKEN_MS,
+    TIMING_PREFILL_MS,
+    TIMING_PREPARE_MS,
+    TIMING_TOTAL_MS,
+)
 
 
 class TestModelEosToken:
@@ -98,3 +105,77 @@ class TestFastFinish:
             fast_times.append((time.perf_counter() - t0) * 1000)
 
         assert sorted(fast_times)[1] < sorted(full_times)[1]
+
+
+# ==================== M2: Multi-Model Properties ====================
+
+
+class TestMultiModelProperties:
+
+    def test_supports_streaming_is_bool(self, model):
+        assert isinstance(model.supports_streaming, bool)
+
+    def test_supports_cuda_graphs_is_bool(self, model):
+        assert isinstance(model.supports_cuda_graphs, bool)
+
+    def test_compilable_module_returns_something(self, model):
+        module = model.compilable_module()
+        # Can be None (model doesn't support) or nn.Module
+        if module is not None:
+            assert hasattr(module, "forward")
+
+    def test_generate_accepts_none_strategy(self, model):
+        """Models must handle strategy=None (for non-autoregressive models)."""
+        audio = np.zeros(16000, dtype=np.float32)
+        inputs = model.prepare_inputs(audio)
+        output = model.generate(inputs, strategy=None)
+        assert isinstance(output.text, str)
+
+
+# ==================== M5: Standardized Timing Keys ====================
+
+
+class TestStandardizedTimings:
+
+    def test_all_standard_keys_present(self, model):
+        audio = np.zeros(16000, dtype=np.float32)
+        inputs = model.prepare_inputs(audio)
+        output = model.generate(inputs, GreedyWithEarlyStopping(eos_token_id=model.eos_token_id))
+
+        for key in [TIMING_PREFILL_MS, TIMING_DECODE_MS, TIMING_DECODE_PER_TOKEN_MS, TIMING_TOTAL_MS]:
+            assert key in output.timings, f"Missing timing key: {key}"
+
+    def test_timing_values_are_positive(self, model):
+        audio = np.random.randn(16000).astype(np.float32) * 0.3
+        inputs = model.prepare_inputs(audio)
+        output = model.generate(inputs, GreedyWithEarlyStopping(eos_token_id=model.eos_token_id))
+
+        assert output.timings[TIMING_PREFILL_MS] > 0
+        assert output.timings[TIMING_TOTAL_MS] > 0
+        if output.n_tokens > 0:
+            assert output.timings[TIMING_DECODE_PER_TOKEN_MS] >= 0
+
+    def test_total_ms_geq_prefill_plus_decode(self, model):
+        audio = np.random.randn(16000).astype(np.float32) * 0.3
+        inputs = model.prepare_inputs(audio)
+        output = model.generate(inputs, GreedyWithEarlyStopping(eos_token_id=model.eos_token_id))
+
+        total = output.timings[TIMING_TOTAL_MS]
+        parts = output.timings[TIMING_PREFILL_MS] + output.timings[TIMING_DECODE_MS]
+        assert total >= parts * 0.9  # allow small measurement noise
+
+
+# ==================== M1: Engine Startup Timings ====================
+
+
+class TestEngineStartupTimings:
+
+    async def test_startup_timings_populated(self, engine):
+        t = engine.startup_timings
+        assert "load_ms" in t
+        assert "warmup_ms" in t
+        assert "compile_ms" in t
+        assert "total_ms" in t
+        assert t["load_ms"] > 0
+        assert t["warmup_ms"] > 0
+        assert t["total_ms"] >= t["load_ms"] + t["warmup_ms"]

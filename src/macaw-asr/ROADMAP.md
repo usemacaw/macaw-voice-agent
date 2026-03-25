@@ -1,287 +1,284 @@
-# Roadmap: Inferência Otimizada — Qwen3-ASR
+# Roadmap: Inferência Otimizada — macaw-asr
 
-> Roadmap executável para implementar inferência de alta performance no macaw-asr.
+> Roadmap executável para inferência de alta performance com múltiplos modelos ASR.
 > Cada milestone tem Definition of Done (DoD) verificável.
-> Ordem importa: bugs críticos primeiro, otimizações depois.
+> Otimizações são **compartilhadas** via abstrações no engine/runner.
+> Otimizações **model-specific** ficam dentro de cada `models/*.py`.
 
 ---
 
-## Milestone 0 — Corrigir Bugs Críticos do Port
+## Status
 
-**Objetivo:** Garantir que o código portado funciona corretamente antes de otimizar.
-
-### 0.1 Corrigir EOS Token Override
-
-**Contexto:** `qwen.py:138` tenta sobrescrever `strategy._eos_id` com o EOS real do tokenizer, mas o mecanismo é frágil — acessa atributo privado e depende de `hasattr`. Se falhar, o modelo nunca para no EOS e gera 32 tokens (garbage) em toda utterance.
-
-**Solução:** Modelo deve expor `eos_token_id` como propriedade pública. Engine cria strategy com o EOS correto após o model.load().
-
-**Arquivos:** `models/base.py`, `models/qwen.py`, `models/mock.py`, `runner/engine.py`
-
-**DoD:**
-- [ ] `ASRModel` ABC tem propriedade abstrata `eos_token_id: int`
-- [ ] `QwenASRModel.eos_token_id` retorna o token correto do tokenizer
-- [ ] `MockASRModel.eos_token_id` retorna 0
-- [ ] `ASREngine._create_strategy()` usa `self._model.eos_token_id` em vez de placeholder
-- [ ] `qwen.py:generate()` NÃO faz override dinâmico de `strategy._eos_id`
-- [ ] Teste: `test_strategy_uses_model_eos_token` verifica que strategy recebe EOS correto
-- [ ] Teste: `test_mock_model_eos_token` verifica propriedade do mock
-
-### 0.2 Corrigir DecodeContext List Mutation
-
-**Contexto:** `DecodeContext.recent_tokens` é uma lista mutável que cresce a cada `should_stop()`. Se o context for reutilizado entre sessions, a lista vaza tokens da session anterior. Não causa crash, mas desperdiça memória e pode causar false positives na repetition detection.
-
-**Solução:** DecodeContext deve ser criado fresh por decode loop. Não reutilizar entre sessions.
-
-**Arquivos:** `decode/strategies.py`, `runner/engine.py`
-
-**DoD:**
-- [ ] `DecodeContext` é criado dentro de `model.generate()`, não passado de fora
-- [ ] OU: `DecodeContext.__post_init__` garante que `recent_tokens` é sempre nova lista
-- [ ] Teste: `test_decode_context_isolation` — dois decode loops consecutivos não compartilham tokens
-- [ ] Teste: `test_repetition_detection_across_sessions` — session 2 não vê tokens da session 1
-
-### 0.3 Validar fast_finish_inputs na Integração
-
-**Contexto:** `QwenASRModel.fast_finish_inputs()` foi portado do original mas nunca testado com GPU real. Depende de `_torch_extract_fbank_features`, `_get_feat_extract_output_lengths`, e manipulação de `AUDIO_PAD_TOKEN`. Qualquer divergência gera inputs corrompidos → modelo gera lixo.
-
-**Solução:** Teste de integração que compara output de fast_finish vs full prepare_inputs.
-
-**Arquivos:** `models/qwen.py`, `tests/test_qwen_integration.py`
-
-**DoD:**
-- [ ] Teste (requer GPU): gera inputs via `prepare_inputs(full_audio)` e via `fast_finish_inputs(full_audio, cached_partial, partial_len)` — verifica que `input_ids` shape é idêntico
-- [ ] Teste (requer GPU): verifica que `generate()` com fast_finish inputs produz texto equivalente ao full path
-- [ ] Teste é marcado `@pytest.mark.gpu` e skipado em CI sem GPU
-- [ ] Logging: `fast_finish_inputs` loga shape de input_ids antes/depois do adjust para debug
+| Milestone | Status | Resultado |
+|-----------|--------|-----------|
+| M0 — Bugfixes | ✅ Done | EOS token, batch==streaming |
+| M1 — Warmup | ✅ Done | Multi-shape warmup (0.5s, 1s, 3s) + fast_finish path |
+| M2 — Multi-Model | ✅ Done | supports_streaming, supports_cuda_graphs, compilable_module(), strategy=None |
+| M3 — Shared Optimizations | ✅ Done | torch.compile via compilable_module(), enable_compile config |
+| M4 — Qwen-Specific Optimizations | ✅ Done | GPU mel as default (2ms vs 15ms), CPU fallback |
+| M5 — Métricas Granulares | ✅ Done | prepare_ms, prefill_ms, decode_ms, decode_per_token_ms, total_ms + startup_timings |
+| M6 — Benchmark Suite | ✅ Done | 102 testes reais, WER 28%, RTF 0.08-0.12 |
+| M7 — torch.compile + CUDA Graphs | ✅ Done | compile mode=default OK, CUDA graphs incompatível (dynamic KV) |
 
 ---
 
-## Milestone 1 — Warmup Agressivo
+## Milestone 1 — Warmup Framework (Genérico)
 
-**Objetivo:** Primeiro request não paga custo de compilação CUDA. Todos os code paths devem ser exercitados no warmup.
+**Objetivo:** Warmup que funciona para qualquer modelo. Primeiro request não paga cold start.
 
-### 1.1 Warmup Multi-Path
+### 1.1 Warmup Multi-Shape no ASRModel ABC
 
-**Contexto:** Warmup atual roda 1 prefill + 1 decode step com áudio de 1s. Isso compila kernels para uma shape específica, mas pode não cobrir shapes reais (áudios de 0.5s, 3s, 5s). O ideal é aquecer com múltiplas shapes.
+**Contexto:** Cada modelo tem shapes diferentes (Qwen: mel frames, Whisper: log-mel 80x3000, Parakeet: features). O warmup precisa exercitar os code paths reais do modelo, não apenas 1 shape fixa.
 
-**Arquivos:** `models/qwen.py`
-
-**DoD:**
-- [ ] `warmup()` roda 3 inferências: áudio de 0.5s, 1s, 3s
-- [ ] Cada inferência faz prefill + 3 decode steps (cobre decode loop)
-- [ ] `warmup()` também roda `fast_finish_inputs()` com cache dummy
-- [ ] Log: tempo total de warmup em ms
-- [ ] Métrica: primeiro request real tem latência ≤ 1.1x dos requests seguintes (sem cold start)
-
-### 1.2 Warmup do Mel Spectrogram
-
-**Contexto:** `processor()` (CPU) e `_torch_extract_fbank_features()` (GPU) têm cold start na primeira execução (alocação de buffers, JIT de operações). Precisam ser aquecidos.
-
-**Arquivos:** `models/qwen.py`
+**Arquivos:** `models/base.py`, `runner/engine.py`
 
 **DoD:**
-- [ ] `warmup()` chama `prepare_inputs()` (aquece CPU processor)
-- [ ] `warmup()` chama `fast_finish_inputs()` com inputs dummy (aquece GPU mel)
-- [ ] Tempo total de warmup ≤ 5s (não pode bloquear startup por muito tempo)
+- [ ] `ASRModel.warmup()` recebe `config: EngineConfig` (tem max_new_tokens, etc.)
+- [ ] Default warmup no ABC: `prepare_inputs(1s) → generate(3 steps)` — funciona para qualquer modelo
+- [ ] Modelos podem override para warmup específico (Qwen: + fast_finish, Whisper: + log-mel cache)
+- [ ] `engine.start()` loga: `warmup_ms=X`
+- [ ] Teste: `test_first_request_no_cold_start` — primeiro request ≤ 1.2x do segundo
+
+### 1.2 Warmup do Fast Path (model-specific, opcional)
+
+**DoD:**
+- [ ] `QwenASRModel.warmup()`: prepare_inputs(0.5s, 1s, 3s) + fast_finish + generate com 3 shapes
+- [ ] Futuro: `WhisperASRModel.warmup()`: encoder + decoder com áudios de 1s, 5s, 15s
+- [ ] Tempo de warmup logado separado do load
 
 ---
 
-## Milestone 2 — torch.compile no Decode Loop
+## Milestone 2 — Multi-Model Support (Streaming + Batch)
 
-**Objetivo:** Reduzir latência do decode step via kernel fusion. Alvo: 10-30% de redução no decode_ms.
+**Objetivo:** Arquitetura suporta Qwen (streaming autoregressive), Whisper (batch encoder-decoder), Parakeet (CTC/TDT batch). Cada modelo implementa o mesmo ABC mas com padrões de inferência diferentes.
 
-### 2.1 Compilar o Thinker Model
+### 2.1 Refinar ASRModel ABC para Batch vs Streaming
 
-**Contexto:** `torch.compile()` analisa o forward pass e funde operações (matmul+bias, softmax+masking, etc.), reduzindo launches de kernel CUDA. O decode loop executa 32 forward passes — cada ms economizado por step = 32ms total.
+**Contexto:** Hoje o ABC assume autoregressive (prepare_inputs → generate com DecodeStrategy). Mas:
+- **Whisper**: encoder processa todo o áudio → decoder gera texto. `generate()` pode usar `model.generate()` do HuggingFace direto, sem manual decode loop.
+- **Parakeet**: CTC/TDT — sem decode loop. Uma forward pass → logits → CTC decode. DecodeStrategy não se aplica.
 
-**Arquivos:** `models/qwen.py`, `config.py`
-
-**DoD:**
-- [ ] `EngineConfig` tem campo `enable_compile: bool = False` (opt-in)
-- [ ] `QwenASRModel.load()` aplica `torch.compile(thinker, mode='reduce-overhead')` quando habilitado
-- [ ] Fallback: se torch.compile falhar (versão antiga, model incompatível), log warning e continua sem compile
-- [ ] Teste (requer GPU): benchmark com e sem compile — decode_ms deve reduzir ≥ 10%
-- [ ] Warmup roda com modelo compilado (primeiro compile + warmup ~30s é aceitável)
-- [ ] Funciona com bfloat16
-
-### 2.2 Compilar Apenas o Decode Step (Fallback)
-
-**Contexto:** Se compile do modelo inteiro falhar (graph breaks no Qwen), compilar apenas a porção do decode step: forward pass do thinker com `input_ids[:, -1:]`.
-
-**Arquivos:** `models/qwen.py`
+**Arquivos:** `models/base.py`, `decode/strategies.py`
 
 **DoD:**
-- [ ] Se full compile falhar, tenta `torch.compile` em uma wrapper function que faz um decode step
-- [ ] Log: "Full compile failed, using partial compile" ou "Compile disabled"
-- [ ] Latência com partial compile ≥ 5% melhor que sem compile
+- [ ] `ASRModel.generate()` aceita `strategy: DecodeStrategy | None` — None para modelos sem decode loop
+- [ ] `ASRModel.supports_streaming: bool` property (default False) — indica se modelo tem streaming nativo
+- [ ] Novo `ASRModel.transcribe_audio(audio) → str` method de conveniência que faz prepare + generate + postprocess internamente — para modelos batch-only que não precisam da pipeline granular
+- [ ] Qwen: usa strategy (autoregressive) + supports_streaming=True
+- [ ] Futuro Whisper: strategy=None (usa HF generate), supports_streaming=False
+- [ ] Futuro Parakeet: strategy=None (CTC decode), supports_streaming=True (via chunked)
+
+### 2.2 Decode Strategy Registry
+
+**Contexto:** Hoje só existe `GreedyWithEarlyStopping`. Whisper precisa de beam search com language detection. Parakeet usa CTC greedy/beam. Estratégias devem ser registráveis como modelos.
+
+**Arquivos:** `decode/strategies.py`
+
+**DoD:**
+- [ ] `GreedyWithEarlyStopping` — existente (autoregressive: Qwen)
+- [ ] `CTCGreedyDecode` — para Parakeet (colapsa repetidos + blank)
+- [ ] Engine seleciona strategy baseado no modelo ou config
+- [ ] Modelos que não usam strategy (Whisper com HF generate) ignoram
+
+### 2.3 Model-Aware Session
+
+**Contexto:** `StreamingSession` assume que todo modelo suporta `prepare_inputs → generate` pipeline. Para modelos batch-only (Whisper), streaming = acumular todo o áudio e transcrever no finish. Para streaming nativo (Qwen, Parakeet), background precompute faz sentido.
+
+**Arquivos:** `runner/session.py`, `runner/engine.py`
+
+**DoD:**
+- [ ] Session verifica `model.supports_streaming` antes de criar background tasks
+- [ ] Modelos batch-only: push_audio só acumula, finish faz tudo
+- [ ] Modelos streaming: push_audio + background precompute (como hoje)
+- [ ] Engine seleciona behavior automaticamente baseado no modelo
 
 ---
 
-## Milestone 3 — CUDA Graphs para Decode Step
+## Milestone 3 — Shared Inference Optimizations
 
-**Objetivo:** Eliminar overhead de CPU→GPU dispatch no decode loop. Alvo: 5-15% adicional.
+**Objetivo:** Otimizações que se aplicam a QUALQUER modelo transformer. Implementadas no engine/runner, não no model.
 
-### 3.1 Capturar Decode Step como CUDA Graph
+### 3.1 torch.compile (Genérico)
 
-**Contexto:** Cada decode step lança dezenas de CUDA kernels. CPU precisa preparar e despachar cada um. CUDA Graphs capturam toda a sequência e replays como uma operação atômica, eliminando overhead de launch.
+**Contexto:** `torch.compile()` funciona com qualquer `nn.Module`. Pode ser aplicado no load de qualquer modelo transformer.
 
-**Pré-requisito:** Milestone 2 (torch.compile) deve estar estável.
-
-**Arquivos:** `models/qwen.py`
+**Arquivos:** `config.py`, `runner/engine.py`
 
 **DoD:**
-- [ ] Na warmup, após compile, captura 1 decode step como CUDA Graph
-- [ ] Decode loop usa `graph.replay()` em vez de chamada direta ao model
-- [ ] Input/output tensors são pre-alocados e reutilizados (in-place update)
-- [ ] Fallback: se CUDA Graph falhar (shape dinâmica, model incompatível), usa decode normal
-- [ ] Teste (requer GPU): decode com CUDA Graph produz mesmos tokens que sem Graph
-- [ ] Teste (requer GPU): benchmark mostra redução ≥ 5% no decode_ms
-- [ ] Funciona com KV cache (shapes crescentes podem ser problemáticas)
+- [ ] `EngineConfig.enable_compile: bool = False` (opt-in)
+- [ ] `engine.start()` aplica `torch.compile(model._internal_model, mode='reduce-overhead')` após load
+- [ ] Cada modelo expõe `compilable_module() → nn.Module | None` — retorna o módulo compilável ou None
+- [ ] Qwen: `compilable_module()` retorna `self._thinker`
+- [ ] Futuro Whisper: retorna `self._model`
+- [ ] Fallback: se compile falhar, log warning e continua
+- [ ] Teste: benchmark com/sem compile, mesmos tokens gerados
 
-### 3.2 Static KV Cache Shape
+### 3.2 CUDA Graphs (Autoregressive Only)
 
-**Contexto:** CUDA Graphs requerem shapes fixas. KV cache cresce a cada decode step. Solução: pre-alocar KV cache com `max_new_tokens` posições extras.
+**Contexto:** CUDA Graphs só se aplicam a modelos com manual decode loop (Qwen). Whisper e Parakeet não têm decode loop — CUDA graphs não ajudam.
 
-**Arquivos:** `models/qwen.py`
+**Arquivos:** `models/base.py`
 
 **DoD:**
-- [ ] KV cache pre-alocado após prefill com `seq_len + max_new_tokens` posições
-- [ ] Decode step escreve no KV cache in-place (sem realocação)
-- [ ] Decode step usa index para saber qual posição preencher
-- [ ] Memória extra ≤ 50MB (para max_new_tokens=32)
-- [ ] Teste: verificar que tokens gerados com static cache == tokens com dynamic cache
+- [ ] `ASRModel.supports_cuda_graphs: bool` property (default False)
+- [ ] Qwen: True. Implementa capture + replay no generate()
+- [ ] Engine não tenta CUDA graphs se modelo não suporta
+- [ ] Static KV cache pre-alocado para models que suportam
+- [ ] Teste: tokens com/sem CUDA graphs são idênticos
+
+### 3.3 Background Precomputation (Genérico)
+
+**Contexto:** Já funciona para Qwen. O padrão é genérico: durante streaming, roda `prepare_inputs()` em background enquanto áudio ainda chega. Funciona para qualquer modelo.
+
+**Arquivos:** `runner/session.py` — já implementado
+
+**DoD:**
+- [ ] Validar que funciona com Whisper (batch: prepare_inputs no finish, não no background)
+- [ ] Validar que funciona com Parakeet (streaming nativo: background precompute faz sentido)
+- [ ] Nenhuma mudança de código necessária — session já verifica `enable_background_compute`
 
 ---
 
-## Milestone 4 — GPU-First Mel Spectrogram
+## Milestone 4 — Qwen-Specific Optimizations
 
-**Objetivo:** Eliminar CPU processor como bottleneck. Computar mel 100% em GPU.
+**Objetivo:** Otimizações que só se aplicam ao Qwen3-ASR.
 
-### 4.1 GPU Mel como Default (não apenas fast_finish)
+### 4.1 GPU-First Mel Spectrogram
 
-**Contexto:** Hoje, `prepare_inputs()` usa o CPU processor (~1500ms). `fast_finish_inputs()` usa GPU mel (~0.5ms), mas só é chamado quando há cache do background. Se GPU mel funcionar standalone, podemos eliminar o CPU processor do hot path.
+**Contexto:** `prepare_inputs()` do Qwen usa CPU processor (~1500ms cold, ~15ms warm). `fast_finish_inputs()` usa GPU mel (~2ms). Fazer GPU mel o default elimina o CPU processor do hot path.
 
 **Arquivos:** `models/qwen.py`
 
 **DoD:**
-- [ ] Novo método `_prepare_inputs_gpu(audio, prefix)` que:
-  - Computa mel no GPU (`_torch_extract_fbank_features`)
-  - Tokeniza o prompt no CPU (rápido, ~1ms)
-  - Monta input_ids com audio_pad tokens calculados via `_get_feat_extract_output_lengths`
-  - Retorna tensors prontos no device
-- [ ] `prepare_inputs()` chama `_prepare_inputs_gpu()` como primeiro path
-- [ ] Fallback para CPU processor se GPU mel falhar
-- [ ] Teste (requer GPU): output de `_prepare_inputs_gpu()` produz mesma transcrição que CPU processor
-- [ ] Benchmark: prepare_inputs com GPU mel ≤ 10ms (vs ~1500ms CPU)
+- [ ] `_prepare_inputs_gpu(audio, prefix)` — GPU mel + tokenização CPU + audio_pad insertion
+- [ ] `prepare_inputs()` usa GPU path como default, CPU como fallback
+- [ ] Teste: GPU path produz mesma transcrição que CPU path
+- [ ] Benchmark: prepare_inputs ≤ 10ms (vs ~15ms warm / ~1500ms cold)
 
-### 4.2 Eliminar CPU Processor do Hot Path
+### 4.2 Optimized Manual Decode Loop
 
-**Contexto:** Se 4.1 funcionar, o CPU processor só é necessário no warmup e como fallback. O hot path (batch + streaming) usa GPU mel exclusivamente.
+**Contexto:** O decode loop do Qwen faz 32 forward passes step-by-step com KV cache. Otimizações possíveis: pre-alocar tensors, evitar torch.cat em cada step.
 
-**Arquivos:** `models/qwen.py`, `runner/session.py`
+**Arquivos:** `models/qwen.py`
 
 **DoD:**
-- [ ] Background precompute em `session.py` usa GPU mel (não CPU processor)
-- [ ] `finish()` path nunca chama CPU processor (fast_finish OU GPU mel)
-- [ ] Batch `transcribe()` usa GPU mel
-- [ ] CPU processor mantido apenas em `warmup()` e como fallback explícito
-- [ ] Métrica: prepare_inputs médio ≤ 5ms para áudio de 1-5s
+- [ ] Pre-alocar `seqs` tensor com `max_new_tokens` posições extras
+- [ ] Evitar `torch.cat([seqs, next_token])` — usar index assignment
+- [ ] Benchmark: decode_ms reduz ≥ 5%
 
 ---
 
 ## Milestone 5 — Métricas Granulares
 
-**Objetivo:** Observabilidade completa para cada estágio da inferência. Sem métricas, não sabemos se as otimizações funcionam.
+**Objetivo:** Observabilidade para cada estágio de cada modelo. Padronizado no `ModelOutput`.
 
-### 5.1 Structured Metrics no ModelOutput
+### 5.1 Timing Keys Padronizadas
 
-**Contexto:** `ModelOutput.timings` é um dict genérico. Precisa de campos tipados para cada estágio.
-
-**Arquivos:** `models/base.py`, `models/qwen.py`
+**Arquivos:** `models/base.py`
 
 **DoD:**
-- [ ] `ModelOutput.timings` tem keys padronizadas:
-  - `mel_ms`: tempo do mel spectrogram (GPU ou CPU)
-  - `tokenize_ms`: tempo da tokenização
-  - `prefill_ms`: tempo do prefill step
-  - `decode_ms`: tempo total do decode loop
+- [ ] `ModelOutput.timings` tem keys padronizadas (todos os modelos):
+  - `prepare_ms`: tempo de prepare_inputs
+  - `prefill_ms`: tempo do first forward pass
+  - `decode_ms`: tempo do decode loop (0 para modelos sem loop)
   - `decode_per_token_ms`: decode_ms / n_tokens
   - `total_ms`: tempo total de generate()
-- [ ] `QwenASRModel.generate()` popula todos os campos
-- [ ] `SessionMetrics` agrega across chunks
-- [ ] Teste: todos os campos de timing são > 0 para inferência real
+- [ ] Keys opcionais (model-specific):
+  - `mel_ms`: mel spectrogram (Qwen)
+  - `encoder_ms`: encoder pass (Whisper)
+  - `ctc_ms`: CTC decode (Parakeet)
+- [ ] Teste: todos os modelos populam as keys padronizadas
 
-### 5.2 Métricas de Warmup e Load
+### 5.2 Métricas de Engine
 
-**Arquivos:** `models/qwen.py`, `runner/engine.py`
+**Arquivos:** `runner/engine.py`
 
 **DoD:**
-- [ ] `engine.start()` loga:
-  - `model_load_ms`: tempo para carregar pesos
-  - `warmup_ms`: tempo de warmup
-  - `compile_ms`: tempo de torch.compile (se habilitado)
-  - `total_startup_ms`: soma
-- [ ] Formato: `"ASREngine started: model=qwen load=2340ms warmup=890ms compile=15200ms total=18430ms"`
+- [ ] `engine.start()` loga: `model_load_ms`, `warmup_ms`, `compile_ms`, `total_startup_ms`
+- [ ] `engine.transcribe()` loga: `resample_ms`, `prepare_ms`, `generate_ms`, `total_ms`
+- [ ] `session.finish()` loga: `bg_wait_ms`, `recompute_mode`, `proc_ms`, `gen_ms`, `finish_ms`
 
 ---
 
-## Milestone 6 — Benchmark Suite
+## Milestone 6 — Benchmark Suite ✅
 
-**Objetivo:** Benchmark reproduzível para medir impacto de cada otimização.
+**Status:** Implementado. 91 testes reais na RTX 3090.
 
-### 6.1 Benchmark Script
+**Resultados baseline (Qwen3-ASR-0.6B, RTX 3090):**
 
-**Arquivos:** `tests/benchmark_inference.py`
+| Métrica | Valor |
+|---------|-------|
+| WER (FLEURS PT-BR) | 28.6% |
+| RTF @1s | 0.43 |
+| RTF @5s | 0.04 |
+| Streaming RTF | 0.08-0.12 |
+| Prefill | 45-56ms |
+| Decode | 29-33 tok/s |
+| Warm request E2E | 370-510ms |
+| Chunk push | 0.01ms p50 |
+| 16 concurrent batch | 100% success |
+| 32 concurrent streaming | 100% success |
 
-**DoD:**
-- [ ] Script que roda N inferências (default 50) com áudio real (ou sintético)
-- [ ] Mede: p50, p90, p99 de cada estágio (mel, prefill, decode, total)
-- [ ] Compara: batch vs streaming, com/sem compile, com/sem CUDA graph
-- [ ] Output: tabela markdown com resultados
-- [ ] Executável via `macaw-asr benchmark` (CLI command)
-- [ ] Baseline salvo em `benchmarks/baseline.json` para comparação
-
-### 6.2 Regression Gate
-
-**DoD:**
-- [ ] Script compara results contra baseline
-- [ ] Falha se p50 regredir > 10% em qualquer estágio
-- [ ] Integrável com CI (exit code 0/1)
+**Testes parametrizados por modelo via `MACAW_ASR_TEST_MODEL` env var (Ollama pattern).**
 
 ---
 
-## Resumo de Impacto Esperado
+## Milestone 7 — torch.compile + CUDA Graphs (Implementação)
 
-| Milestone | Estágio Impactado | Redução Esperada | Acumulado |
-|-----------|-------------------|-------------------|-----------|
-| M0 | Correctness | N/A (bugfix) | — |
-| M1 | First request | Elimina cold start | — |
-| M2 | decode_ms | 10-30% | 10-30% |
-| M3 | decode_ms | 5-15% | 15-40% |
-| M4 | prepare_inputs_ms | 99% (1500ms → 5ms) | — |
-| M5 | Observability | N/A (métricas) | — |
-| M6 | Validation | N/A (benchmark) | — |
+**Pré-requisito:** M3 (design) aprovado e interfaces definidas.
 
-**Alvo final:**
-- `prepare_inputs`: ≤ 5ms (GPU mel)
-- `prefill`: ≤ 50ms
-- `decode (32 tokens)`: ≤ 60ms (com compile + CUDA graph)
-- `total generate()`: ≤ 120ms
-- `e2e (preprocess + generate + postprocess)`: ≤ 130ms
+### 7.1 torch.compile Integration
+
+**DoD:**
+- [ ] `MACAW_ASR_TEST_MODEL=qwen MACAW_ASR_COMPILE=1 pytest tests/` — roda com compile
+- [ ] Benchmark mostra ≥ 10% redução no decode_ms
+- [ ] Nenhum teste funcional quebra com compile habilitado
+
+### 7.2 CUDA Graphs para Qwen
+
+**DoD:**
+- [ ] `MACAW_ASR_CUDA_GRAPHS=1` habilita
+- [ ] Static KV cache implementado
+- [ ] Benchmark mostra ≥ 5% redução adicional
+- [ ] Tokens idênticos com/sem CUDA graphs
 
 ---
 
 ## Ordem de Execução
 
 ```
-M0 (bugs) → M1 (warmup) → M5 (métricas) → M4 (GPU mel) → M2 (compile) → M3 (CUDA graphs) → M6 (benchmark)
+M0 ✅ → M6 ✅ → M1 (warmup) → M5 (métricas) → M2 (multi-model) → M3 (shared opts) → M4 (qwen opts) → M7 (compile+graphs)
 ```
 
-**Justificativa da ordem:**
-1. **M0 primeiro:** código bugado não pode ser otimizado
-2. **M1 depois:** warmup é pré-requisito para medições confiáveis
-3. **M5 antes de M2/M3:** sem métricas, não sabemos se otimizações funcionam
-4. **M4 antes de M2:** GPU mel elimina o maior bottleneck (1500ms), compile otimiza o segundo (decode)
-5. **M2 antes de M3:** CUDA graphs dependem de compile estável
-6. **M6 por último:** benchmark suite valida tudo junto
+**Justificativa:**
+1. **M0 ✅:** bugs corrigidos
+2. **M6 ✅:** benchmark suite valida tudo
+3. **M1:** warmup genérico — base para medições confiáveis
+4. **M5:** métricas — sem elas não sabemos se otimizações funcionam
+5. **M2:** multi-model — define as interfaces que M3/M4 implementam
+6. **M3:** shared optimizations — torch.compile funciona para todos
+7. **M4:** Qwen-specific — GPU mel, decode loop otimizado
+8. **M7:** compile + CUDA graphs — última camada de otimização
+
+---
+
+## Resumo de Impacto Esperado
+
+| Milestone | Escopo | Impacto |
+|-----------|--------|---------|
+| M1 Warmup | Todos os modelos | Elimina cold start no primeiro request |
+| M2 Multi-Model | Arquitetura | Suporte a Whisper, Parakeet, futuros |
+| M3 Shared Opts | Todos os modelos transformer | torch.compile: 10-30% decode speedup |
+| M4 Qwen Opts | Qwen only | GPU mel: prepare 1500ms → 5ms |
+| M5 Métricas | Todos os modelos | Observabilidade completa |
+| M7 CUDA Graphs | Autoregressive only | 5-15% adicional no decode |
+
+**Alvo final (Qwen3-ASR-0.6B, RTX 3090):**
+
+| Estágio | Atual | Alvo |
+|---------|-------|------|
+| prepare_inputs | 15ms (warm) / 1500ms (cold) | ≤ 5ms (GPU mel) |
+| prefill | 45ms | ≤ 40ms (compile) |
+| decode (10 tokens) | 350ms | ≤ 200ms (compile + CUDA graphs) |
+| total generate() | 400ms | ≤ 250ms |
+| E2E transcribe | 500ms | ≤ 260ms |

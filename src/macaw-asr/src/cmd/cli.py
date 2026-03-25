@@ -109,14 +109,21 @@ def _cmd_pull(args: argparse.Namespace) -> None:
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
-    """Start the HTTP server."""
-    print(f"Starting macaw-asr server on {args.host}:{args.port}...")
-    print("(HTTP server not yet implemented — use the Python API directly)")
-    print()
-    print("Python API usage:")
-    print("  import macaw_asr")
-    print('  engine = await macaw_asr.create_engine(model="qwen")')
-    print("  text = await engine.transcribe(audio_bytes)")
+    """Start the HTTP server (FastAPI + Uvicorn)."""
+    try:
+        import uvicorn
+    except ImportError:
+        print("uvicorn is required: pip install uvicorn", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"macaw-asr server starting on http://{args.host}:{args.port}")
+    print(f"  Docs: http://{args.host}:{args.port}/docs")
+    uvicorn.run(
+        "macaw_asr.server.app:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
 
 
 async def _cmd_transcribe(args: argparse.Namespace) -> None:

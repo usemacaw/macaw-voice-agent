@@ -3,17 +3,10 @@
 Equivalent to Ollama's runner dispatcher: owns model lifecycle
 and delegates per-request work to StreamingSession instances.
 
-Usage (batch):
-    engine = ASREngine(config)
-    await engine.start()
-    text = await engine.transcribe(pcm_bytes)
-    await engine.stop()
-
-Usage (streaming):
-    await engine.create_session("s1")
-    for chunk in audio_chunks:
-        partial = await engine.push_audio("s1", chunk)
-    final = await engine.finish_session("s1")
+M1: Warmup with config passed to model
+M2: Strategy creation aware of model type (strategy=None for non-autoregressive)
+M3: torch.compile applied generically via compilable_module()
+M5: Structured startup metrics (load_ms, compile_ms, warmup_ms)
 """
 
 from __future__ import annotations
@@ -26,7 +19,7 @@ from macaw_asr._executor import create_executor, run_in_executor
 from macaw_asr.audio.preprocessing import AudioPreprocessor
 from macaw_asr.config import EngineConfig
 from macaw_asr.decode.postprocess import clean_asr_text
-from macaw_asr.decode.strategies import GreedyWithEarlyStopping
+from macaw_asr.decode.strategies import DecodeStrategy, GreedyWithEarlyStopping
 from macaw_asr.models.base import ASRModel, create_model
 from macaw_asr.runner.session import StreamingSession
 
@@ -37,11 +30,9 @@ class ASREngine:
     """Main inference orchestrator.
 
     Responsibilities (SRP):
-    - Model lifecycle (load/unload)
+    - Model lifecycle (load/compile/warmup/unload)
     - Session management (create/finish/cancel)
     - Batch transcription
-
-    Does NOT contain streaming logic — that's in StreamingSession.
     """
 
     def __init__(self, config: EngineConfig) -> None:
@@ -51,6 +42,7 @@ class ASREngine:
         self._executor: ThreadPoolExecutor | None = None
         self._sessions: dict[str, StreamingSession] = {}
         self._started = False
+        self._startup_timings: dict[str, float] = {}
 
     @property
     def config(self) -> EngineConfig:
@@ -60,26 +52,49 @@ class ASREngine:
     def is_started(self) -> bool:
         return self._started
 
+    @property
+    def startup_timings(self) -> dict[str, float]:
+        return dict(self._startup_timings)
+
     async def start(self) -> None:
-        """Load model and prepare for inference."""
+        """Load model, optionally compile, warmup, prepare for inference."""
         if self._started:
             return
 
+        t_total = _time.perf_counter()
         self._executor = create_executor(self._config.max_inference_workers)
         self._model = create_model(self._config.model_name)
 
-        logger.info(
-            "Loading model: name=%s, id=%s, device=%s",
-            self._config.model_name,
-            self._config.model_id,
-            self._config.device,
-        )
-
+        # Load
+        t0 = _time.perf_counter()
         await run_in_executor(self._executor, self._model.load, self._config)
-        await run_in_executor(self._executor, self._model.warmup)
+        load_ms = (_time.perf_counter() - t0) * 1000
+
+        # Compile (M3 — generic torch.compile via compilable_module)
+        compile_ms = 0.0
+        if self._config.enable_compile:
+            compile_ms = await self._apply_compile()
+
+        # Warmup (M1 — passes config to model for multi-shape warmup)
+        t0 = _time.perf_counter()
+        await run_in_executor(self._executor, self._model.warmup, self._config)
+        warmup_ms = (_time.perf_counter() - t0) * 1000
+
+        total_ms = (_time.perf_counter() - t_total) * 1000
+
+        self._startup_timings = {
+            "load_ms": load_ms,
+            "compile_ms": compile_ms,
+            "warmup_ms": warmup_ms,
+            "total_ms": total_ms,
+        }
 
         self._started = True
-        logger.info("ASREngine started: %s", self._config.model_name)
+        logger.info(
+            "ASREngine started: model=%s load=%.0fms compile=%.0fms "
+            "warmup=%.0fms total=%.0fms",
+            self._config.model_name, load_ms, compile_ms, warmup_ms, total_ms,
+        )
 
     async def stop(self) -> None:
         """Unload model and free resources."""
@@ -160,12 +175,10 @@ class ASREngine:
         logger.debug("Session created: %s", session_id[:8] or "default")
 
     async def push_audio(self, session_id: str, pcm_chunk: bytes) -> str:
-        """Push an audio chunk to a streaming session."""
         session = self._get_session(session_id)
         return await session.push_audio(pcm_chunk)
 
     async def finish_session(self, session_id: str) -> str:
-        """Finish a streaming session and get final transcription."""
         session = self._sessions.pop(session_id, None)
         if session is None:
             raise RuntimeError(f"Session not found: {session_id}")
@@ -176,14 +189,45 @@ class ASREngine:
 
     # ==================== Internal ====================
 
+    async def _apply_compile(self) -> float:
+        """Apply torch.compile to the model's compilable module (M3)."""
+        module = self._model.compilable_module()
+        if module is None:
+            logger.info("Model does not support torch.compile — skipping")
+            return 0.0
+
+        try:
+            import torch
+            t0 = _time.perf_counter()
+            # 'default' mode: kernel fusion without CUDA graph capture.
+            # 'reduce-overhead' uses CUDA graphs which fail with dynamic
+            # KV cache shapes in autoregressive models (PyTorch 2.5.x bug).
+            compiled = torch.compile(module, mode="default")
+            # Replace the module reference in the model
+            # This is model-specific — for Qwen it's _thinker
+            if hasattr(self._model, "_thinker") and self._model._thinker is module:
+                self._model._thinker = compiled
+            compile_ms = (_time.perf_counter() - t0) * 1000
+            logger.info("torch.compile applied: %.0fms", compile_ms)
+            return compile_ms
+        except Exception as e:
+            logger.warning("torch.compile failed: %s — continuing without", e)
+            return 0.0
+
     async def _cancel_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
         if session is not None:
             await session.cancel()
 
-    def _create_strategy(self) -> GreedyWithEarlyStopping:
+    def _create_strategy(self) -> DecodeStrategy | None:
+        """Create decode strategy based on model capabilities (M2)."""
+        try:
+            eos = self._model.eos_token_id
+        except (RuntimeError, AttributeError):
+            return None
+
         return GreedyWithEarlyStopping(
-            eos_token_id=self._model.eos_token_id,
+            eos_token_id=eos,
             repetition_window=self._config.streaming.repetition_window,
         )
 

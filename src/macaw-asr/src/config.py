@@ -98,6 +98,9 @@ class EngineConfig:
     max_inference_workers: int = 2
     """Max concurrent inference threads."""
 
+    enable_compile: bool = False
+    """Apply torch.compile to the model after loading (opt-in)."""
+
     audio: AudioConfig = field(default_factory=AudioConfig)
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 

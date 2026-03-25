@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>macaw-asr demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 300;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        .subtitle {
+            font-size: 0.85rem;
+            color: #666;
+            margin-bottom: 2rem;
+        }
+        .status {
+            font-size: 0.8rem;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            margin-bottom: 1.5rem;
+        }
+        .status.connected { background: #0a2e0a; color: #4ade80; }
+        .status.disconnected { background: #2e0a0a; color: #f87171; }
+        .status.loading { background: #2e2a0a; color: #fbbf24; }
+
+        .record-btn {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: 3px solid #333;
+            background: #1a1a1a;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            margin-bottom: 1rem;
+        }
+        .record-btn:hover { border-color: #555; background: #222; }
+        .record-btn.recording {
+            border-color: #ef4444;
+            background: #1a0a0a;
+            animation: pulse 1.5s infinite;
+        }
+        .record-btn .icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #ef4444;
+            transition: all 0.2s;
+        }
+        .record-btn.recording .icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            50% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
+        }
+        .hint { font-size: 0.8rem; color: #555; margin-bottom: 2rem; }
+
+        .results {
+            width: 100%;
+            max-width: 600px;
+        }
+        .result {
+            background: #141414;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+        }
+        .result .text {
+            font-size: 1.1rem;
+            color: #fff;
+            margin-bottom: 0.5rem;
+            line-height: 1.4;
+        }
+        .result .meta {
+            font-size: 0.75rem;
+            color: #555;
+        }
+        .result .meta span { margin-right: 1rem; }
+        .result.processing {
+            border-color: #fbbf24;
+        }
+        .result.processing .text {
+            color: #fbbf24;
+        }
+
+        .config {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            font-size: 0.75rem;
+            color: #444;
+        }
+        .config input {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #aaa;
+            padding: 0.3rem 0.5rem;
+            border-radius: 4px;
+            width: 220px;
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>macaw-asr</h1>
+    <p class="subtitle">Speech-to-Text Demo — Qwen3-ASR-0.6B</p>
+
+    <div id="status" class="status loading">Checking server...</div>
+
+    <button id="recordBtn" class="record-btn" disabled>
+        <div class="icon"></div>
+    </button>
+    <p class="hint" id="hint">Click to record</p>
+
+    <div class="results" id="results"></div>
+
+    <div class="config">
+        <label>Server: <input id="serverUrl" value="http://localhost:8766" /></label>
+    </div>
+
+    <script>
+        const btn = document.getElementById('recordBtn');
+        const hint = document.getElementById('hint');
+        const statusEl = document.getElementById('status');
+        const resultsEl = document.getElementById('results');
+        const serverInput = document.getElementById('serverUrl');
+
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let recording = false;
+        let audioContext = null;
+
+        function getServer() {
+            return serverInput.value.replace(/\/$/, '');
+        }
+
+        // Check server health
+        async function checkHealth() {
+            try {
+                const resp = await fetch(getServer() + '/');
+                if (resp.ok) {
+                    statusEl.textContent = 'Connected to ' + getServer();
+                    statusEl.className = 'status connected';
+                    btn.disabled = false;
+                    return true;
+                }
+            } catch (e) {}
+            statusEl.textContent = 'Cannot reach server';
+            statusEl.className = 'status disconnected';
+            btn.disabled = true;
+            return false;
+        }
+
+        // Convert AudioBuffer to PCM16 bytes at 8kHz
+        function audioBufferToPCM16(buffer, targetRate = 8000) {
+            const srcRate = buffer.sampleRate;
+            const srcData = buffer.getChannelData(0); // mono
+
+            // Simple resample via linear interpolation
+            const ratio = srcRate / targetRate;
+            const targetLen = Math.floor(srcData.length / ratio);
+            const pcm = new Int16Array(targetLen);
+
+            for (let i = 0; i < targetLen; i++) {
+                const srcIdx = i * ratio;
+                const lo = Math.floor(srcIdx);
+                const hi = Math.min(lo + 1, srcData.length - 1);
+                const frac = srcIdx - lo;
+                const sample = srcData[lo] * (1 - frac) + srcData[hi] * frac;
+                pcm[i] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)));
+            }
+
+            return pcm.buffer;
+        }
+
+        // ArrayBuffer to base64 (safe for large buffers)
+        function arrayBufferToBase64(buffer) {
+            const bytes = new Uint8Array(buffer);
+            const chunks = [];
+            const chunkSize = 8192;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                const chunk = bytes.subarray(i, i + chunkSize);
+                chunks.push(String.fromCharCode.apply(null, chunk));
+            }
+            return btoa(chunks.join(''));
+        }
+
+        // Transcribe audio via API
+        async function transcribe(pcmBuffer) {
+            const b64 = arrayBufferToBase64(pcmBuffer);
+            console.log('Sending audio:', pcmBuffer.byteLength, 'bytes, b64:', b64.length, 'chars');
+
+            const card = document.createElement('div');
+            card.className = 'result processing';
+            card.innerHTML = '<div class="text">Transcribing...</div><div class="meta"></div>';
+            resultsEl.prepend(card);
+
+            try {
+                const t0 = performance.now();
+                const resp = await fetch(getServer() + '/api/transcribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: 'qwen',
+                        audio: b64,
+                        language: 'pt',
+                    }),
+                });
+
+                const data = await resp.json();
+                const elapsed = Math.round(performance.now() - t0);
+
+                if (data.error) {
+                    card.className = 'result';
+                    card.querySelector('.text').textContent = 'Error: ' + data.error;
+                    card.querySelector('.text').style.color = '#f87171';
+                    return;
+                }
+
+                card.className = 'result';
+                card.querySelector('.text').textContent = data.text || '(empty)';
+                const durMs = Math.round(data.total_duration / 1e6);
+                card.querySelector('.meta').innerHTML =
+                    `<span>Model: ${data.model}</span>` +
+                    `<span>Server: ${durMs}ms</span>` +
+                    `<span>Total: ${elapsed}ms</span>`;
+            } catch (e) {
+                card.className = 'result';
+                card.querySelector('.text').textContent = 'Error: ' + e.message;
+                card.querySelector('.text').style.color = '#f87171';
+            }
+        }
+
+        // Record button handler
+        btn.addEventListener('click', async () => {
+            if (!recording) {
+                // Start recording
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        audio: { sampleRate: 48000, channelCount: 1 }
+                    });
+                    audioContext = new AudioContext();
+                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+                    audioChunks = [];
+
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) audioChunks.push(e.data);
+                    };
+
+                    mediaRecorder.onstop = async () => {
+                        stream.getTracks().forEach(t => t.stop());
+                        hint.textContent = 'Processing audio...';
+
+                        try {
+                            const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                            console.log('Recorded blob:', blob.size, 'bytes, chunks:', audioChunks.length);
+                            const arrayBuffer = await blob.arrayBuffer();
+                            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                            console.log('Decoded:', audioBuffer.duration.toFixed(1) + 's', audioBuffer.sampleRate + 'Hz');
+                            const pcm = audioBufferToPCM16(audioBuffer, 8000);
+                            console.log('PCM16 8kHz:', pcm.byteLength, 'bytes');
+
+                            hint.textContent = `Recorded ${audioBuffer.duration.toFixed(1)}s — transcribing...`;
+                            await transcribe(pcm);
+                        } catch (e) {
+                            console.error('Audio processing error:', e);
+                            hint.textContent = 'Error: ' + e.message;
+                        }
+                        hint.textContent = 'Click to record';
+                    };
+
+                    mediaRecorder.start();
+                    recording = true;
+                    btn.classList.add('recording');
+                    hint.textContent = 'Recording... click to stop';
+                } catch (e) {
+                    hint.textContent = 'Mic access denied: ' + e.message;
+                }
+            } else {
+                // Stop recording
+                mediaRecorder.stop();
+                recording = false;
+                btn.classList.remove('recording');
+                hint.textContent = 'Processing...';
+            }
+        });
+
+        // Initial health check + periodic
+        checkHealth();
+        setInterval(checkHealth, 10000);
+        serverInput.addEventListener('change', checkHealth);
+    </script>
+</body>
+</html>

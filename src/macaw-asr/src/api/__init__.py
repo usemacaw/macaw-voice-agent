@@ -1,21 +1,31 @@
+from macaw_asr.api.client import ASRClient
 from macaw_asr.api.types import (
-    ModelInfo,
+    DeleteRequest,
+    ListResponse,
     PullRequest,
     PullResponse,
-    StreamChunk,
+    ShowRequest,
+    ShowResponse,
     StreamFinishResponse,
+    StreamPushRequest,
     StreamStartRequest,
     TranscribeRequest,
     TranscribeResponse,
+    VersionResponse,
 )
 
 __all__ = [
-    "ModelInfo",
+    "ASRClient",
+    "DeleteRequest",
+    "ListResponse",
     "PullRequest",
     "PullResponse",
-    "StreamChunk",
+    "ShowRequest",
+    "ShowResponse",
     "StreamFinishResponse",
+    "StreamPushRequest",
     "StreamStartRequest",
     "TranscribeRequest",
     "TranscribeResponse",
+    "VersionResponse",
 ]
