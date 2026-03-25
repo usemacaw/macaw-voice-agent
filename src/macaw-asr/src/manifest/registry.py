@@ -25,7 +25,10 @@ logger = logging.getLogger("macaw-asr.manifest.registry")
 ProgressCallback = Callable[[PullResponse], None]
 
 
-class ModelRegistry:
+from macaw_asr.manifest.contracts import IModelRegistry
+
+
+class ModelRegistry(IModelRegistry):
     """Downloads, caches, and resolves ASR models.
 
     Models are stored locally at ~/.macaw-asr/models/.

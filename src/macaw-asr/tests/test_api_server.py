@@ -54,8 +54,8 @@ class TestShow:
         assert data["details"]["family"] == "qwen"
         assert data["details"]["parameter_size"] == "0.6B"
 
-    def test_show_alias(self, client):
-        r = client.post("/api/show", json={"model": "whisper-1"})
+    def test_show_by_registry_name(self, client):
+        r = client.post("/api/show", json={"model": "whisper-tiny"})
         assert r.status_code == 200
 
     def test_show_missing_model(self, client):

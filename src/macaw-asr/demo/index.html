@@ -121,6 +121,37 @@ function arrayBufferToBase64(buf){
   return btoa(chunks.join(''));
 }
 
+// Load models from server dynamically
+let cachedModels = [];
+async function loadModels(){
+  try{
+    const r=await fetch(S()+'/v1/models');
+    const data=await r.json();
+    cachedModels=data.data.map(m=>m.id);
+  }catch(e){cachedModels=['whisper-1','qwen','mock']}
+  // Populate any visible model dropdown after loading
+  populateModelSelect();
+}
+function populateModelSelect(){
+  // Populate all selects with id fModel
+  const sel=document.getElementById('fModel');
+  if(!sel||cachedModels.length===0)return;
+  if(sel.tagName!=='SELECT')return; // skip text inputs (show, pull, delete)
+  const prev=sel.value;
+  sel.innerHTML='';
+  cachedModels.forEach(m=>{
+    const opt=document.createElement('option');
+    opt.value=m;opt.textContent=m;
+    sel.appendChild(opt);
+  });
+  // Restore previous selection or default to whisper-1
+  if(prev&&cachedModels.includes(prev))sel.value=prev;
+  else if(cachedModels.includes('whisper-1'))sel.value='whisper-1';
+}
+// Load on start + reload when server URL changes
+loadModels();
+document.getElementById('serverUrl').addEventListener('change',loadModels);
+
 // Forms
 function renderForm(ep){
   let html='<h3>Request</h3>';
@@ -133,7 +164,7 @@ function renderForm(ep){
         <input type="file" id="fileInput" accept="audio/*" style="display:none">
         <button class="btn btn-record" id="recordBtn">🎤 Record from microphone</button>
         <div class="form-group" style="margin-top:.8rem"><label>Model</label>
-          <select id="fModel"><option>whisper-1</option><option>gpt-4o-transcribe</option><option>gpt-4o-mini-transcribe</option><option>qwen</option><option>mock</option></select></div>
+          <select id="fModel"><option>Loading...</option></select></div>
         <div class="form-group"><label>Language</label><input id="fLang" value="pt" placeholder="ISO-639-1"></div>
         <div class="form-group"><label>Response Format</label>
           <select id="fFormat"><option>json</option><option>text</option><option>verbose_json</option><option>srt</option><option>vtt</option></select></div>
@@ -161,6 +192,8 @@ function renderForm(ep){
       html+=`<button class="btn btn-primary" onclick="sendSimple('GET','/')">Send</button>`;break;
   }
   reqPanel.innerHTML=html;
+  // Populate model dropdown dynamically
+  populateModelSelect();
   // Wire file drop
   const drop=document.getElementById('fileDrop');
   const fileIn=document.getElementById('fileInput');

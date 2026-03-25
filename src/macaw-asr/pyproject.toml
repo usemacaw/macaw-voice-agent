@@ -38,10 +38,15 @@ packages = [
     "macaw_asr",
     "macaw_asr.audio",
     "macaw_asr.models",
+    "macaw_asr.models.qwen",
+    "macaw_asr.models.mock",
+    "macaw_asr.models.whisper",
+    "macaw_asr.models.parakeet",
     "macaw_asr.decode",
     "macaw_asr.runner",
     "macaw_asr.api",
     "macaw_asr.server",
+    "macaw_asr.server.routes",
     "macaw_asr.manifest",
     "macaw_asr.cmd",
 ]
@@ -50,10 +55,15 @@ packages = [
 "macaw_asr" = "src"
 "macaw_asr.audio" = "src/audio"
 "macaw_asr.models" = "src/models"
+"macaw_asr.models.qwen" = "src/models/qwen"
+"macaw_asr.models.mock" = "src/models/mock"
+"macaw_asr.models.whisper" = "src/models/whisper"
+"macaw_asr.models.parakeet" = "src/models/parakeet"
 "macaw_asr.decode" = "src/decode"
 "macaw_asr.runner" = "src/runner"
 "macaw_asr.api" = "src/api"
 "macaw_asr.server" = "src/server"
+"macaw_asr.server.routes" = "src/server/routes"
 "macaw_asr.manifest" = "src/manifest"
 "macaw_asr.cmd" = "src/cmd"
 

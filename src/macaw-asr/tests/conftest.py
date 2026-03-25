@@ -32,13 +32,31 @@ _MODEL_CONFIGS = {
         "dtype": "bfloat16",
         "model_sample_rate": 16000,
     },
-    # Future models:
-    # "whisper": {
-    #     "model_name": "whisper",
-    #     "model_id": "openai/whisper-large-v3",
-    #     "dtype": "float16",
-    #     "model_sample_rate": 16000,
-    # },
+    "whisper-tiny": {
+        "model_name": "whisper-tiny",
+        "model_id": "openai/whisper-tiny",
+        "dtype": "float16",
+        "model_sample_rate": 16000,
+    },
+    "whisper-small": {
+        "model_name": "whisper-small",
+        "model_id": "openai/whisper-small",
+        "dtype": "float16",
+        "model_sample_rate": 16000,
+    },
+    "whisper-medium": {
+        "model_name": "whisper-medium",
+        "model_id": "openai/whisper-medium",
+        "dtype": "float16",
+        "model_sample_rate": 16000,
+    },
+    "whisper-large": {
+        "model_name": "whisper-large",
+        "model_id": "openai/whisper-large-v3",
+        "dtype": "float16",
+        "model_sample_rate": 16000,
+    },
+    # Future:
     # "parakeet": {
     #     "model_name": "parakeet",
     #     "model_id": "nvidia/parakeet-tdt-0.6b-v2",

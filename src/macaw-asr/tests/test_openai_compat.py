@@ -200,17 +200,19 @@ class TestOpenAIModels:
         assert isinstance(data["data"], list)
         assert len(data["data"]) > 0
 
-    def test_models_have_openai_aliases(self, client):
-        r = client.get("/v1/models")
-        ids = [m["id"] for m in r.json()["data"]]
-        assert "whisper-1" in ids
-        assert "gpt-4o-transcribe" in ids
-
-    def test_models_have_native(self, client):
+    def test_models_have_real_models(self, client):
+        """Only real implemented models listed — no fake aliases."""
         r = client.get("/v1/models")
         ids = [m["id"] for m in r.json()["data"]]
         assert "qwen" in ids
-        assert "mock" in ids
+        assert "whisper-tiny" in ids
+
+    def test_models_no_fake_aliases(self, client):
+        """Fake aliases like gpt-4o-transcribe-diarize must NOT appear."""
+        r = client.get("/v1/models")
+        ids = [m["id"] for m in r.json()["data"]]
+        assert "gpt-4o-transcribe-diarize" not in ids
+        assert "mock" not in ids
 
     def test_model_entry_format(self, client):
         r = client.get("/v1/models")

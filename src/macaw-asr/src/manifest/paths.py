@@ -17,7 +17,10 @@ import os
 from pathlib import Path
 
 
-class ModelPaths:
+from macaw_asr.manifest.contracts import IModelPaths
+
+
+class ModelPaths(IModelPaths):
     """Resolves filesystem paths for model storage.
 
     Uses MACAW_ASR_HOME env var or defaults to ~/.macaw-asr/.
