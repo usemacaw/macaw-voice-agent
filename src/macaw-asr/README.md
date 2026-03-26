@@ -3,8 +3,9 @@
 Self-contained ASR engine with pluggable models. Drop-in replacement for the OpenAI Audio API.
 
 ```bash
-pip install macaw-asr
-macaw-asr serve --port 8766
+pip install macaw-asr[faster-whisper]
+macaw-asr pull faster-whisper-small
+macaw-asr serve
 ```
 
 ```python
@@ -21,31 +22,70 @@ print(result.text)
 
 ## Models
 
-| Model | ID | Family | Params | PT-BR | Streaming |
-|-------|-----|--------|--------|-------|-----------|
-| Qwen3-ASR | `qwen` | qwen | 0.6B | Yes | Yes (token-by-token SSE) |
-| Whisper Tiny | `whisper-tiny` | whisper | 39M | Yes | No (batch) |
-| Whisper Small | `whisper-small` | whisper | 244M | Yes | No (batch) |
-| Whisper Medium | `whisper-medium` | whisper | 769M | Yes | No (batch) |
-| Whisper Large | `whisper-large` | whisper | 1.5B | Yes | No (batch) |
-| Parakeet TDT | `parakeet` | parakeet | 0.6B | Yes (best) | No (batch) |
-| Parakeet CTC | `parakeet-ctc` | parakeet | 1.1B | Yes | No (batch) |
+| Model | ID | Family | Backend | Params | PT-BR | Streaming |
+|-------|-----|--------|---------|--------|-------|-----------|
+| Faster-Whisper Tiny | `faster-whisper-tiny` | faster-whisper | CTranslate2 | 39M | Yes | No (batch) |
+| Faster-Whisper Small | `faster-whisper-small` | faster-whisper | CTranslate2 | 244M | Yes | No (batch) |
+| Faster-Whisper Medium | `faster-whisper-medium` | faster-whisper | CTranslate2 | 769M | Yes | No (batch) |
+| Faster-Whisper Large | `faster-whisper-large` | faster-whisper | CTranslate2 | 1.5B | Yes | No (batch) |
+| Qwen3-ASR | `qwen` | qwen | PyTorch | 0.6B | Yes | Yes (token-by-token SSE) |
+| Whisper Tiny | `whisper-tiny` | whisper | PyTorch | 39M | Yes | No (batch) |
+| Whisper Small | `whisper-small` | whisper | PyTorch | 244M | Yes | No (batch) |
+| Whisper Medium | `whisper-medium` | whisper | PyTorch | 769M | Yes | No (batch) |
+| Whisper Large | `whisper-large` | whisper | PyTorch | 1.5B | Yes | No (batch) |
+| Parakeet TDT | `parakeet` | parakeet | NeMo | 0.6B | Yes (best) | No (batch) |
+| Parakeet CTC | `parakeet-ctc` | parakeet | NeMo | 1.1B | Yes | No (batch) |
+
+## Install
+
+The core package is lightweight (~5MB). Each model family installs only its own dependencies:
+
+```bash
+pip install macaw-asr                    # Core only (API server, CLI)
+pip install macaw-asr[faster-whisper]    # Faster-Whisper (CTranslate2, ~200MB, no PyTorch)
+pip install macaw-asr[whisper]           # Whisper (PyTorch + transformers)
+pip install macaw-asr[qwen]             # Qwen3-ASR (PyTorch + transformers + qwen-asr)
+pip install macaw-asr[parakeet]         # Parakeet (PyTorch + NeMo)
+pip install macaw-asr[all]              # Everything
+```
 
 ## Quick Start
 
 ```bash
-# Install
-pip install macaw-asr[qwen]      # Qwen3-ASR
-pip install macaw-asr[scipy]     # Better resampling
+# Pull a model (resolves short names automatically)
+macaw-asr pull faster-whisper-small
 
-# Start server with Qwen
-MACAW_ASR_MODEL=qwen MACAW_ASR_MODEL_ID=Qwen/Qwen3-ASR-0.6B macaw-asr serve
+# Start server
+macaw-asr serve
 
-# Start server with Whisper
-MACAW_ASR_MODEL=whisper-tiny MACAW_ASR_MODEL_ID=openai/whisper-tiny macaw-asr serve
+# Or specify model via env
+MACAW_ASR_MODEL=faster-whisper-small macaw-asr serve
 
-# Start server with Parakeet (requires nemo_toolkit[asr])
-MACAW_ASR_MODEL=parakeet MACAW_ASR_MODEL_ID=nvidia/parakeet-tdt-0.6b-v3 macaw-asr serve
+# Transcribe a file directly (no server needed)
+macaw-asr transcribe audio.wav --model faster-whisper-small
+
+# List all available models and dependency status
+macaw-asr list --all
+```
+
+If dependencies are missing, the CLI tells you exactly what to install:
+
+```
+$ macaw-asr pull parakeet
+Resolved: parakeet -> nvidia/parakeet-tdt-0.6b-v3 (family: parakeet)
+Missing dependencies: nemo
+Install with: pip install "macaw-asr[parakeet]"
+```
+
+## CLI
+
+```bash
+macaw-asr pull <model>         # Download model (short name or HuggingFace ID)
+macaw-asr serve                # Start HTTP server (:8766)
+macaw-asr transcribe <file>    # Transcribe audio file
+macaw-asr list                 # List downloaded models
+macaw-asr list --all           # List all available models with dep status
+macaw-asr remove <model>       # Remove a downloaded model
 ```
 
 ## API Endpoints
@@ -185,7 +225,7 @@ That's it. `macaw-asr serve` with `MACAW_ASR_MODEL=my-model` will load and serve
 src/
 ├── models/                          # Model layer (SOLID + Design Patterns)
 │   ├── contracts.py                 # IModelLoader, IPreprocessor, IDecoder, IStreamDecoder, IASRModel
-│   ├── registry.py                  # Centralized model metadata (single source of truth)
+│   ├── registry.py                  # Model metadata + FamilyDeps (dependency management)
 │   ├── factory.py                   # ModelFactory (Factory Pattern, lazy loading)
 │   ├── types.py                     # ModelOutput, InputsWrapper, timing constants
 │   ├── qwen/                        # Qwen3-ASR (autoregressive, streaming)
@@ -194,7 +234,9 @@ src/
 │   │   ├── decoder.py               # Manual decode loop with KV cache (DRY)
 │   │   ├── prompt.py                # Chat template builder
 │   │   └── model.py                 # Facade (composes all above)
-│   ├── whisper/                     # OpenAI Whisper (encoder-decoder, batch)
+│   ├── whisper/                     # OpenAI Whisper (PyTorch, encoder-decoder, batch)
+│   │   ├── loader.py, preprocessor.py, decoder.py, model.py
+│   ├── faster_whisper/              # Faster-Whisper (CTranslate2, no PyTorch)
 │   │   ├── loader.py, preprocessor.py, decoder.py, model.py
 │   ├── parakeet/                    # NVIDIA Parakeet TDT (NeMo, batch)
 │   │   ├── loader.py, preprocessor.py, decoder.py, model.py
@@ -226,7 +268,7 @@ src/
 ├── manifest/                        # Model storage (Repository Pattern)
 │   ├── contracts.py                 # IModelPaths, IModelRegistry
 │   ├── paths.py                     # ~/.macaw-asr/models/ layout
-│   └── registry.py                  # Download, cache, resolve
+│   └── registry.py                  # Download, cache, resolve (short name support)
 │
 ├── api/                             # Wire types + client
 │   ├── types.py                     # Pydantic models (OpenAI format)
@@ -245,7 +287,7 @@ src/
 | Facade | `QwenASRModel` | Compose loader+preprocessor+decoder |
 | Strategy | `DecodeStrategy` | Pluggable decode stopping logic |
 | Template Method | `QwenDecoder._decode_loop()` | Shared loop for batch + stream |
-| Registry | `models/registry.py` | Single source of truth for models |
+| Registry | `models/registry.py` | Single source of truth for models + deps |
 | Repository | `ModelRegistry` | Abstract model storage |
 | Router (MVC) | `routes/audio.py`, `routes/models.py` | Separate HTTP concerns |
 | Dependency Injection | `app.state` | No globals, testable |
@@ -256,7 +298,7 @@ src/
 |-----------|---------------|
 | **S** — Single Responsibility | Each file has one job: loader loads, decoder decodes, router routes |
 | **O** — Open/Closed | New model = new directory. Zero changes to existing code |
-| **L** — Liskov Substitution | Mock, Qwen, Whisper, Parakeet all substitute via IASRModel |
+| **L** — Liskov Substitution | Mock, Qwen, Whisper, Faster-Whisper, Parakeet all substitute via IASRModel |
 | **I** — Interface Segregation | IModelLoader, IPreprocessor, IDecoder, IStreamDecoder — small focused interfaces |
 | **D** — Dependency Inversion | Engine depends on IASRModel, not QwenASRModel. Routes use app.state, not globals |
 
@@ -266,6 +308,7 @@ src/
 # Run with specific model on GPU
 MACAW_ASR_TEST_MODEL=qwen pytest tests/
 MACAW_ASR_TEST_MODEL=whisper-tiny pytest tests/
+MACAW_ASR_TEST_MODEL=faster-whisper-tiny pytest tests/
 
 # API tests (mock model, no GPU)
 pytest tests/test_api_server.py tests/test_openai_compat.py
@@ -290,6 +333,7 @@ All via environment variables:
 | `MACAW_ASR_LANGUAGE` | `pt` | Default language |
 | `MACAW_ASR_MAX_NEW_TOKENS` | `32` | Max decode tokens |
 | `MACAW_ASR_CHUNK_SIZE_SEC` | `1.0` | Streaming chunk trigger |
+| `MACAW_ASR_HOME` | `~/.macaw-asr` | Local model storage |
 
 ## License
 

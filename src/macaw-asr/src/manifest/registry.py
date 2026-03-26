@@ -44,32 +44,40 @@ class ModelRegistry(IModelRegistry):
         return self._paths
 
     def resolve(self, model_id: str) -> str:
-        """Resolve a model ID to a local path.
+        """Resolve a model ID or short name to a local path.
 
-        Returns the model_id as-is if it's a local path that exists.
-        Otherwise looks in the local cache.
+        Accepts both short names ('whisper-small') and HuggingFace IDs
+        ('openai/whisper-small'). Short names are resolved via the
+        models registry.
 
         Raises:
             FileNotFoundError: If model is not downloaded locally.
         """
+        from macaw_asr.models.registry import resolve_name
+
+        # Resolve short name → HuggingFace ID
+        meta = resolve_name(model_id)
+        actual_id = meta.model_id if meta else model_id
+
         # Direct local path
-        if Path(model_id).exists():
-            return model_id
+        if Path(actual_id).exists():
+            return actual_id
 
         # Check local cache
-        if self._paths.model_exists(model_id):
-            return str(self._paths.model_dir(model_id))
+        if self._paths.model_exists(actual_id):
+            return str(self._paths.model_dir(actual_id))
 
         # Check HuggingFace cache (model may have been loaded via transformers)
         try:
-            hf_path = self._resolve_hf_cache(model_id)
+            hf_path = self._resolve_hf_cache(actual_id)
             if hf_path:
                 return hf_path
         except Exception:
             pass
 
+        hint = model_id if model_id == actual_id else f"{model_id} (or: {actual_id})"
         raise FileNotFoundError(
-            f"Model '{model_id}' not found locally. "
+            f"Model '{hint}' not found locally. "
             f"Run: macaw-asr pull {model_id}"
         )
 
@@ -80,18 +88,38 @@ class ModelRegistry(IModelRegistry):
     ) -> str:
         """Download a model from HuggingFace Hub.
 
+        Accepts short names ('whisper-small') or HuggingFace IDs.
+        Checks that required dependencies are installed before downloading.
+
         Args:
-            model_id: HuggingFace model ID (e.g. 'Qwen/Qwen3-ASR-0.6B').
+            model_id: Short name or HuggingFace model ID.
             progress_fn: Optional callback for download progress.
 
         Returns:
             Local path to the downloaded model.
         """
-        if self._paths.model_exists(model_id):
+        from macaw_asr.models.registry import resolve_name, check_deps, get_family_deps
+
+        # Resolve short name → metadata
+        meta = resolve_name(model_id)
+        actual_id = meta.model_id if meta else model_id
+
+        # Check dependencies before downloading
+        if meta:
+            ok, missing = check_deps(meta.family)
+            if not ok:
+                deps_info = get_family_deps(meta.family)
+                install_hint = deps_info.install_cmd if deps_info else f"pip install the required packages: {', '.join(missing)}"
+                raise RuntimeError(
+                    f"Missing dependencies for {meta.family} models: {', '.join(missing)}\n"
+                    f"Install with: {install_hint}"
+                )
+
+        if self._paths.model_exists(actual_id):
             if progress_fn:
                 progress_fn(PullResponse(status="complete", completed=1, total=1))
-            logger.info("Model already downloaded: %s", model_id)
-            return str(self._paths.model_dir(model_id))
+            logger.info("Model already downloaded: %s", actual_id)
+            return str(self._paths.model_dir(actual_id))
 
         if progress_fn:
             progress_fn(PullResponse(status="downloading"))
@@ -99,16 +127,16 @@ class ModelRegistry(IModelRegistry):
         try:
             from huggingface_hub import snapshot_download
 
-            local_dir = self._paths.model_dir(model_id)
+            local_dir = self._paths.model_dir(actual_id)
             snapshot_download(
-                repo_id=model_id,
+                repo_id=actual_id,
                 local_dir=str(local_dir),
             )
 
             if progress_fn:
                 progress_fn(PullResponse(status="complete"))
 
-            logger.info("Model downloaded: %s → %s", model_id, local_dir)
+            logger.info("Model downloaded: %s → %s", actual_id, local_dir)
             return str(local_dir)
 
         except ImportError:
@@ -119,7 +147,7 @@ class ModelRegistry(IModelRegistry):
         except Exception as e:
             if progress_fn:
                 progress_fn(PullResponse(status="error"))
-            raise RuntimeError(f"Failed to download model '{model_id}': {e}") from e
+            raise RuntimeError(f"Failed to download model '{actual_id}': {e}") from e
 
     def remove(self, model_id: str) -> bool:
         """Remove a locally downloaded model.

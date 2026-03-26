@@ -20,6 +20,21 @@ qwen = [
     "torch>=2.0.0",
     "transformers>=4.40.0",
     "qwen-asr",
+    "huggingface_hub>=0.20.0",
+]
+whisper = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "huggingface_hub>=0.20.0",
+]
+faster-whisper = [
+    "faster-whisper>=1.0.0",
+    "huggingface_hub>=0.20.0",
+]
+parakeet = [
+    "torch>=2.0.0",
+    "nemo_toolkit[asr]>=2.0.0",
+    "huggingface_hub>=0.20.0",
 ]
 scipy = ["scipy>=1.10.0"]
 hf = ["huggingface_hub>=0.20.0"]
@@ -28,7 +43,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.24.0",
 ]
-all = ["macaw-asr[qwen,scipy,hf,dev]"]
+all = ["macaw-asr[qwen,whisper,faster-whisper,parakeet,scipy,hf,dev]"]
 
 [project.scripts]
 macaw-asr = "macaw_asr.cmd.cli:main"
@@ -42,6 +57,7 @@ packages = [
     "macaw_asr.models.mock",
     "macaw_asr.models.whisper",
     "macaw_asr.models.parakeet",
+    "macaw_asr.models.faster_whisper",
     "macaw_asr.decode",
     "macaw_asr.runner",
     "macaw_asr.api",
@@ -59,6 +75,7 @@ packages = [
 "macaw_asr.models.mock" = "src/models/mock"
 "macaw_asr.models.whisper" = "src/models/whisper"
 "macaw_asr.models.parakeet" = "src/models/parakeet"
+"macaw_asr.models.faster_whisper" = "src/models/faster_whisper"
 "macaw_asr.decode" = "src/decode"
 "macaw_asr.runner" = "src/runner"
 "macaw_asr.api" = "src/api"

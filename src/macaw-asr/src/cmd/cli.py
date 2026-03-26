@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # pull
     pull_parser = subparsers.add_parser("pull", help="Download a model")
-    pull_parser.add_argument("model", help="Model ID (e.g. Qwen/Qwen3-ASR-0.6B)")
+    pull_parser.add_argument("model", help="Model name (e.g. whisper-small) or HuggingFace ID")
 
     # serve
     serve_parser = subparsers.add_parser("serve", help="Start HTTP server")
@@ -54,7 +54,11 @@ def main(argv: list[str] | None = None) -> None:
     transcribe_parser.add_argument("--device", default="cuda:0", help="Device")
 
     # list
-    subparsers.add_parser("list", help="List local models")
+    list_parser = subparsers.add_parser("list", help="List models")
+    list_parser.add_argument(
+        "--all", action="store_true", dest="show_all",
+        help="Show all available models (not just downloaded)",
+    )
 
     # remove
     remove_parser = subparsers.add_parser("remove", help="Remove a model")
@@ -87,22 +91,34 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _cmd_pull(args: argparse.Namespace) -> None:
-    """Download a model."""
+    """Download a model. Resolves short names and checks dependencies."""
+    from macaw_asr.models.registry import resolve_name
     from macaw_asr.manifest.registry import ModelRegistry
+
+    # Resolve short name
+    meta = resolve_name(args.model)
+    if meta:
+        print(f"Resolved: {args.model} -> {meta.model_id} (family: {meta.family})")
+    else:
+        print(f"Model '{args.model}' not in registry, treating as HuggingFace ID...")
 
     registry = ModelRegistry()
 
     def _progress(resp):
         if resp.status == "downloading":
-            print(f"Downloading {args.model}...")
+            display = meta.model_id if meta else args.model
+            print(f"Downloading {display}...")
         elif resp.status == "complete":
-            print(f"Done: {args.model}")
+            print("Done.")
         elif resp.status == "error":
-            print(f"Error downloading {args.model}", file=sys.stderr)
+            print("Error downloading model.", file=sys.stderr)
 
     try:
         path = registry.pull(args.model, progress_fn=_progress)
         print(f"Model saved to: {path}")
+    except RuntimeError as e:
+        print(f"\n{e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -170,6 +186,14 @@ async def _cmd_transcribe(args: argparse.Namespace) -> None:
 
 
 def _cmd_list(args: argparse.Namespace) -> None:
+    """List models. Without --all: downloaded only. With --all: all available."""
+    if getattr(args, "show_all", False):
+        _cmd_list_all()
+    else:
+        _cmd_list_downloaded()
+
+
+def _cmd_list_downloaded() -> None:
     """List locally downloaded models."""
     from macaw_asr.manifest.registry import ModelRegistry
 
@@ -178,7 +202,8 @@ def _cmd_list(args: argparse.Namespace) -> None:
 
     if not models:
         print("No models downloaded.")
-        print("Run: macaw-asr pull Qwen/Qwen3-ASR-0.6B")
+        print("Run: macaw-asr pull whisper-small")
+        print("\nUse 'macaw-asr list --all' to see all available models.")
         return
 
     print(f"{'NAME':<30} {'MODEL ID':<40} {'SIZE':<12}")
@@ -186,6 +211,28 @@ def _cmd_list(args: argparse.Namespace) -> None:
     for m in models:
         size_str = _format_size(m.size_bytes)
         print(f"{m.name:<30} {m.model_id:<40} {size_str:<12}")
+    print(f"\nUse 'macaw-asr list --all' to see all available models.")
+
+
+def _cmd_list_all() -> None:
+    """List all available models with dependency status."""
+    from macaw_asr.models.registry import list_all, check_deps, get_family_deps
+
+    models = [m for m in list_all() if m.family != "mock"]
+    if not models:
+        print("No models registered.")
+        return
+
+    print(f"{'NAME':<25} {'FAMILY':<16} {'SIZE':<8} {'DEPS'}")
+    print("-" * 70)
+    for m in models:
+        ok, missing = check_deps(m.family)
+        if ok:
+            deps_str = "ok"
+        else:
+            deps_info = get_family_deps(m.family)
+            deps_str = f"missing ({deps_info.install_cmd})" if deps_info else f"missing: {', '.join(missing)}"
+        print(f"{m.name:<25} {m.family:<16} {m.param_size:<8} {deps_str}")
 
 
 def _cmd_remove(args: argparse.Namespace) -> None:
