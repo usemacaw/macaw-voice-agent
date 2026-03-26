@@ -3,344 +3,373 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>macaw-asr — API Test Console</title>
+<title>macaw-asr — API Console</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh}
 .layout{display:flex;height:100vh}
-.sidebar{width:240px;background:#111;border-right:1px solid #222;padding:1rem;overflow-y:auto}
-.sidebar h2{font-size:.9rem;color:#888;margin-bottom:.8rem;text-transform:uppercase;letter-spacing:.05em}
-.sidebar button{display:block;width:100%;text-align:left;padding:.5rem .7rem;margin-bottom:.3rem;background:transparent;border:1px solid transparent;color:#ccc;border-radius:4px;cursor:pointer;font-size:.8rem}
-.sidebar button:hover{background:#1a1a1a;border-color:#333}
+.sidebar{width:220px;background:#111;border-right:1px solid #222;padding:1rem;overflow-y:auto;flex-shrink:0}
+.sidebar h2{font-size:.75rem;color:#555;margin-bottom:.5rem;margin-top:1rem;text-transform:uppercase;letter-spacing:.08em}
+.sidebar h2:first-child{margin-top:0}
+.sidebar button{display:block;width:100%;text-align:left;padding:.4rem .6rem;margin-bottom:.2rem;background:transparent;border:1px solid transparent;color:#999;border-radius:4px;cursor:pointer;font-size:.75rem}
+.sidebar button:hover{background:#1a1a1a;border-color:#333;color:#ccc}
 .sidebar button.active{background:#1a2a1a;border-color:#4ade80;color:#4ade80}
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.header{padding:.8rem 1.2rem;border-bottom:1px solid #222;display:flex;align-items:center;gap:1rem}
-.header h1{font-size:1.1rem;font-weight:400;color:#fff}
-.status{font-size:.75rem;padding:.2rem .6rem;border-radius:3px}
-.status.ok{background:#0a2e0a;color:#4ade80}
-.status.err{background:#2e0a0a;color:#f87171}
-.status.load{background:#2e2a0a;color:#fbbf24}
-.config-bar{padding:.5rem 1.2rem;border-bottom:1px solid #1a1a1a;display:flex;gap:.8rem;align-items:center;font-size:.8rem}
-.config-bar label{color:#666}
-.config-bar input{background:#141414;border:1px solid #333;color:#ccc;padding:.3rem .5rem;border-radius:3px;font-size:.8rem;width:260px}
+.topbar{padding:.5rem 1rem;border-bottom:1px solid #222;display:flex;align-items:center;gap:.8rem;font-size:.8rem}
+.topbar h1{font-size:1rem;font-weight:500;color:#fff}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot.ok{background:#4ade80}.dot.err{background:#f87171}.dot.load{background:#fbbf24}
+.topbar input{background:#141414;border:1px solid #333;color:#ccc;padding:.25rem .5rem;border-radius:3px;font-size:.75rem;width:220px}
 .content{flex:1;display:flex;overflow:hidden}
-.panel{flex:1;padding:1.2rem;overflow-y:auto}
-.panel.request{border-right:1px solid #1a1a1a}
-.panel h3{font-size:.85rem;color:#888;margin-bottom:.8rem;text-transform:uppercase}
-.form-group{margin-bottom:.8rem}
-.form-group label{display:block;font-size:.75rem;color:#666;margin-bottom:.3rem}
-.form-group input,.form-group select,.form-group textarea{width:100%;background:#141414;border:1px solid #2a2a2a;color:#ccc;padding:.4rem .6rem;border-radius:4px;font-size:.8rem;font-family:monospace}
-.form-group textarea{height:60px;resize:vertical}
-.btn{padding:.5rem 1rem;border:none;border-radius:4px;cursor:pointer;font-size:.8rem;font-weight:500}
-.btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
-.btn-record{background:#dc2626;color:#fff;width:100%}.btn-record:hover{background:#b91c1c}
-.btn-record.recording{animation:pulse 1.5s infinite}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.4)}50%{box-shadow:0 0 0 10px rgba(220,38,38,0)}}
-.response-box{background:#0d0d0d;border:1px solid #222;border-radius:6px;padding:.8rem;font-family:monospace;font-size:.78rem;white-space:pre-wrap;word-break:break-all;max-height:100%;overflow-y:auto;line-height:1.5}
-.response-box .status-line{color:#4ade80;font-weight:bold;margin-bottom:.5rem}
-.response-box .error{color:#f87171}
-.response-box .sse-event{color:#60a5fa;border-left:2px solid #2563eb;padding-left:.5rem;margin:.3rem 0}
-.response-box .timing{color:#888;font-style:italic}
-.tabs{display:flex;gap:0;margin-bottom:.8rem}
-.tab{padding:.4rem .8rem;background:#111;border:1px solid #222;color:#888;cursor:pointer;font-size:.75rem}
-.tab:first-child{border-radius:4px 0 0 4px}
-.tab:last-child{border-radius:0 4px 4px 0}
-.tab.active{background:#1a2a1a;color:#4ade80;border-color:#4ade80}
-.file-drop{border:2px dashed #333;border-radius:6px;padding:1.5rem;text-align:center;color:#555;cursor:pointer;margin-bottom:.8rem;font-size:.8rem}
-.file-drop:hover{border-color:#555;color:#888}
-.file-drop.has-file{border-color:#4ade80;color:#4ade80}
+.panel{flex:1;padding:1rem;overflow-y:auto}
+.panel.left{border-right:1px solid #1a1a1a;max-width:400px}
+.panel h3{font-size:.75rem;color:#555;margin-bottom:.6rem;text-transform:uppercase;letter-spacing:.05em}
+.fg{margin-bottom:.6rem}
+.fg label{display:block;font-size:.7rem;color:#555;margin-bottom:.2rem}
+.fg input,.fg select{width:100%;background:#141414;border:1px solid #2a2a2a;color:#ccc;padding:.35rem .5rem;border-radius:3px;font-size:.78rem;font-family:monospace}
+.btn{padding:.4rem .8rem;border:none;border-radius:4px;cursor:pointer;font-size:.78rem;font-weight:500}
+.btn-go{background:#2563eb;color:#fff;width:100%;margin-top:.5rem}.btn-go:hover{background:#1d4ed8}
+.btn-rec{background:#dc2626;color:#fff;width:100%;margin-top:.3rem;font-size:.75rem}.btn-rec:hover{background:#b91c1c}
+.btn-rec.on{animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.4)}50%{box-shadow:0 0 0 8px rgba(220,38,38,0)}}
+.drop{border:2px dashed #333;border-radius:6px;padding:1rem;text-align:center;color:#444;cursor:pointer;margin-bottom:.6rem;font-size:.75rem}
+.drop:hover{border-color:#555;color:#666}.drop.has{border-color:#4ade80;color:#4ade80}
+.out{background:#0d0d0d;border:1px solid #222;border-radius:6px;padding:.8rem;font-family:monospace;font-size:.75rem;white-space:pre-wrap;word-break:break-all;line-height:1.5;overflow-y:auto;flex:1}
+.out .ok{color:#4ade80;font-weight:bold}.out .err{color:#f87171}.out .sse{color:#60a5fa;border-left:2px solid #2563eb;padding-left:.5rem;margin:.2rem 0}.out .dim{color:#555}
+/* Metrics panel */
+.metrics-bar{display:flex;gap:3px;align-items:flex-end;height:24px;margin-top:.3rem}
+.metrics-bar .bar{background:#2563eb;border-radius:2px 2px 0 0;min-width:3px;transition:height .2s}
+.metrics-card{background:#111;border:1px solid #222;border-radius:6px;padding:.6rem;margin-bottom:.5rem}
+.metrics-card h4{font-size:.7rem;color:#555;margin-bottom:.4rem;text-transform:uppercase}
+.metrics-row{display:flex;justify-content:space-between;font-size:.72rem;padding:.15rem 0;border-bottom:1px solid #1a1a1a}
+.metrics-row:last-child{border:none}
+.metrics-row .k{color:#888}.metrics-row .v{color:#4ade80;font-family:monospace}
+.metrics-row .v.slow{color:#fbbf24}.metrics-row .v.bad{color:#f87171}
 </style>
 </head>
 <body>
 <div class="layout">
 <div class="sidebar">
   <h2>Audio</h2>
-  <button class="active" data-endpoint="transcribe">POST /v1/audio/transcriptions</button>
-  <button data-endpoint="transcribe-stream">POST /v1/audio/transcriptions (stream)</button>
-  <button data-endpoint="translate">POST /v1/audio/translations</button>
-  <h2 style="margin-top:1rem">Models</h2>
-  <button data-endpoint="models">GET /v1/models</button>
-  <button data-endpoint="show">POST /api/show</button>
-  <button data-endpoint="ps">GET /api/ps</button>
-  <button data-endpoint="pull">POST /api/pull</button>
-  <button data-endpoint="delete">DELETE /api/delete</button>
-  <h2 style="margin-top:1rem">System</h2>
-  <button data-endpoint="version">GET /api/version</button>
-  <button data-endpoint="health">GET /</button>
+  <button class="active" data-ep="transcribe">POST transcriptions</button>
+  <button data-ep="stream">POST transcriptions (SSE)</button>
+  <button data-ep="translate">POST translations</button>
+  <h2>Models</h2>
+  <button data-ep="models">GET /v1/models</button>
+  <button data-ep="show">POST /api/show</button>
+  <button data-ep="ps">GET /api/ps</button>
+  <button data-ep="pull">POST /api/pull</button>
+  <button data-ep="delete">DELETE /api/delete</button>
+  <h2>System</h2>
+  <button data-ep="metrics">GET /api/metrics</button>
+  <button data-ep="version">GET /api/version</button>
+  <button data-ep="health">GET /</button>
 </div>
 <div class="main">
-  <div class="header">
-    <h1>macaw-asr API Console</h1>
-    <span id="status" class="status load">Checking...</span>
-  </div>
-  <div class="config-bar">
-    <label>Server:</label>
-    <input id="serverUrl" value="http://localhost:8766">
+  <div class="topbar">
+    <h1>macaw-asr</h1>
+    <span id="dot" class="dot load"></span>
+    <input id="srv" value="http://localhost:8766" placeholder="Server URL">
   </div>
   <div class="content">
-    <div class="panel request" id="requestPanel"></div>
-    <div class="panel" id="responsePanel">
+    <div class="panel left" id="reqP"></div>
+    <div class="panel" style="display:flex;flex-direction:column">
       <h3>Response</h3>
-      <div class="response-box" id="responseBox">Click an endpoint and Send to see results.</div>
+      <div class="out" id="out">Select an endpoint and click Send.</div>
+      <div id="timingsPanel"></div>
     </div>
   </div>
 </div>
 </div>
 
 <script>
-const S = () => document.getElementById('serverUrl').value.replace(/\/$/,'');
-const reqPanel = document.getElementById('requestPanel');
-const respBox = document.getElementById('responseBox');
-const statusEl = document.getElementById('status');
-let currentEndpoint = 'transcribe';
-let audioFile = null;
-let mediaRecorder = null;
-let audioChunks = [];
-let recording = false;
+const $=id=>document.getElementById(id);
+const S=()=>$('srv').value.replace(/\/$/,'');
+let ep='transcribe',af=null,mr=null,rec=false,models=[];
 
-// Health check
-async function checkHealth(){
-  try{const r=await fetch(S()+'/');if(r.ok){statusEl.textContent='Connected';statusEl.className='status ok';return}}catch(e){}
-  statusEl.textContent='Disconnected';statusEl.className='status err';
+// Health
+async function ck(){try{const r=await fetch(S()+'/');$('dot').className='dot '+(r.ok?'ok':'err')}catch{$('dot').className='dot err'}}
+setInterval(ck,8000);ck();
+
+// Models
+async function loadModels(){
+  try{const r=await fetch(S()+'/v1/models');const d=await r.json();models=d.data.map(m=>m.id)}catch{models=['whisper-1']}
+  popSel();
 }
-setInterval(checkHealth,8000);checkHealth();
+function popSel(){
+  const s=$('fModel');if(!s||s.tagName!=='SELECT')return;
+  const p=s.value;s.innerHTML='';
+  models.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;s.appendChild(o)});
+  if(p&&models.includes(p))s.value=p;
+}
+loadModels();$('srv').onchange=()=>{ck();loadModels()};
 
 // Sidebar
 document.querySelectorAll('.sidebar button').forEach(b=>{
-  b.addEventListener('click',()=>{
+  b.onclick=()=>{
     document.querySelectorAll('.sidebar button').forEach(x=>x.classList.remove('active'));
-    b.classList.add('active');
-    currentEndpoint=b.dataset.endpoint;
-    renderForm(currentEndpoint);
-  });
+    b.classList.add('active');ep=b.dataset.ep;form(ep);
+  };
 });
 
-function arrayBufferToBase64(buf){
-  const bytes=new Uint8Array(buf);const chunks=[];
-  for(let i=0;i<bytes.length;i+=8192)chunks.push(String.fromCharCode.apply(null,bytes.subarray(i,i+8192)));
-  return btoa(chunks.join(''));
-}
-
-// Load models from server dynamically
-let cachedModels = [];
-async function loadModels(){
-  try{
-    const r=await fetch(S()+'/v1/models');
-    const data=await r.json();
-    cachedModels=data.data.map(m=>m.id);
-  }catch(e){cachedModels=['whisper-1','qwen','mock']}
-  // Populate any visible model dropdown after loading
-  populateModelSelect();
-}
-function populateModelSelect(){
-  // Populate all selects with id fModel
-  const sel=document.getElementById('fModel');
-  if(!sel||cachedModels.length===0)return;
-  if(sel.tagName!=='SELECT')return; // skip text inputs (show, pull, delete)
-  const prev=sel.value;
-  sel.innerHTML='';
-  cachedModels.forEach(m=>{
-    const opt=document.createElement('option');
-    opt.value=m;opt.textContent=m;
-    sel.appendChild(opt);
-  });
-  // Restore previous selection or default to whisper-1
-  if(prev&&cachedModels.includes(prev))sel.value=prev;
-  else if(cachedModels.includes('whisper-1'))sel.value='whisper-1';
-}
-// Load on start + reload when server URL changes
-loadModels();
-document.getElementById('serverUrl').addEventListener('change',loadModels);
-
 // Forms
-function renderForm(ep){
-  let html='<h3>Request</h3>';
-  switch(ep){
-    case 'transcribe':
-    case 'transcribe-stream':
-    case 'translate':
-      html+=`
-        <div class="file-drop" id="fileDrop">Drop audio file here or click to select</div>
-        <input type="file" id="fileInput" accept="audio/*" style="display:none">
-        <button class="btn btn-record" id="recordBtn">🎤 Record from microphone</button>
-        <div class="form-group" style="margin-top:.8rem"><label>Model</label>
-          <select id="fModel"><option>Loading...</option></select></div>
-        <div class="form-group"><label>Language</label><input id="fLang" value="pt" placeholder="ISO-639-1"></div>
-        <div class="form-group"><label>Response Format</label>
-          <select id="fFormat"><option>json</option><option>text</option><option>verbose_json</option><option>srt</option><option>vtt</option></select></div>
-        ${ep==='transcribe-stream'?'<div class="form-group"><label>Stream</label><input value="true" disabled></div>':''}
-        <button class="btn btn-primary" style="margin-top:.8rem;width:100%" onclick="sendTranscribe('${ep}')">Send</button>`;
-      break;
-    case 'models':
-      html+=`<p style="color:#888;font-size:.8rem;margin-bottom:1rem">Lists all available models (OpenAI + native).</p>
-        <button class="btn btn-primary" onclick="sendSimple('GET','/v1/models')">Send</button>`;break;
-    case 'show':
-      html+=`<div class="form-group"><label>Model</label><input id="fModel" value="qwen"></div>
-        <button class="btn btn-primary" onclick="sendJson('POST','/api/show',{model:document.getElementById('fModel').value})">Send</button>`;break;
-    case 'ps':
-      html+=`<p style="color:#888;font-size:.8rem;margin-bottom:1rem">Lists models currently loaded in GPU memory.</p>
-        <button class="btn btn-primary" onclick="sendSimple('GET','/api/ps')">Send</button>`;break;
-    case 'pull':
-      html+=`<div class="form-group"><label>Model ID (HuggingFace)</label><input id="fModel" value="Qwen/Qwen3-ASR-0.6B"></div>
-        <button class="btn btn-primary" onclick="sendJson('POST','/api/pull',{model:document.getElementById('fModel').value,stream:false})">Send</button>`;break;
-    case 'delete':
-      html+=`<div class="form-group"><label>Model</label><input id="fModel" value=""></div>
-        <button class="btn btn-primary" onclick="sendJson('DELETE','/api/delete',{model:document.getElementById('fModel').value})">Send</button>`;break;
-    case 'version':
-      html+=`<button class="btn btn-primary" onclick="sendSimple('GET','/api/version')">Send</button>`;break;
-    case 'health':
-      html+=`<button class="btn btn-primary" onclick="sendSimple('GET','/')">Send</button>`;break;
+function form(e){
+  let h='<h3>Request</h3>';
+  if(['transcribe','stream','translate'].includes(e)){
+    h+=`<div class="drop" id="drop">Drop audio or click</div>
+    <input type="file" id="fi" accept="audio/*" style="display:none">
+    <button class="btn btn-rec" id="recB">Record</button>
+    <div class="fg" style="margin-top:.5rem"><label>Model</label><select id="fModel"></select></div>
+    <div class="fg"><label>Language</label><input id="fLang" value="pt"></div>
+    <div class="fg"><label>Format</label><select id="fFmt">
+      <option>json</option><option>text</option><option>verbose_json</option><option>srt</option><option>vtt</option></select></div>
+    ${e==='stream'?'<div class="fg"><label>Stream</label><input value="true" disabled></div>':''}
+    <button class="btn btn-go" onclick="go()">Send</button>`;
+  }else if(e==='models'){
+    h+=`<p style="color:#555;font-size:.75rem;margin-bottom:.8rem">List all available models.</p>
+    <button class="btn btn-go" onclick="get('/v1/models')">Send</button>`;
+  }else if(e==='show'){
+    h+=`<div class="fg"><label>Model</label><input id="fModel" value="qwen"></div>
+    <button class="btn btn-go" onclick="post('/api/show',{model:$('fModel').value})">Send</button>`;
+  }else if(e==='ps'){
+    h+=`<button class="btn btn-go" onclick="get('/api/ps')">Send</button>`;
+  }else if(e==='pull'){
+    h+=`<div class="fg"><label>Model</label><input id="fModel" value="faster-whisper-small"></div>
+    <button class="btn btn-go" onclick="post('/api/pull',{model:$('fModel').value,stream:false})">Send</button>`;
+  }else if(e==='delete'){
+    h+=`<div class="fg"><label>Model</label><input id="fModel" value=""></div>
+    <button class="btn btn-go" onclick="del('/api/delete',{model:$('fModel').value})">Send</button>`;
+  }else if(e==='metrics'){
+    h+=`<p style="color:#555;font-size:.75rem;margin-bottom:.8rem">Aggregated latency metrics per model with percentiles.</p>
+    <button class="btn btn-go" onclick="getMetrics()">Load Metrics</button>
+    <button class="btn btn-go" style="margin-top:.3rem;background:#333" onclick="autoMetrics()">Auto-refresh (2s)</button>`;
+  }else if(e==='version'){
+    h+=`<button class="btn btn-go" onclick="get('/api/version')">Send</button>`;
+  }else if(e==='health'){
+    h+=`<button class="btn btn-go" onclick="get('/')">Send</button>`;
   }
-  reqPanel.innerHTML=html;
-  // Populate model dropdown dynamically
-  populateModelSelect();
-  // Wire file drop
-  const drop=document.getElementById('fileDrop');
-  const fileIn=document.getElementById('fileInput');
-  if(drop){
-    drop.onclick=()=>fileIn.click();
-    drop.ondragover=e=>{e.preventDefault();drop.style.borderColor='#4ade80'};
-    drop.ondragleave=()=>{drop.style.borderColor=audioFile?'#4ade80':'#333'};
-    drop.ondrop=e=>{e.preventDefault();handleFile(e.dataTransfer.files[0])};
-    fileIn.onchange=e=>{if(e.target.files[0])handleFile(e.target.files[0])};
-  }
-  // Wire record
-  const recBtn=document.getElementById('recordBtn');
-  if(recBtn)recBtn.onclick=toggleRecord;
+  $('reqP').innerHTML=h;popSel();
+  // Wire
+  const d=$('drop'),fi=$('fi');
+  if(d){d.onclick=()=>fi.click();d.ondragover=e=>{e.preventDefault();d.style.borderColor='#4ade80'};
+    d.ondragleave=()=>d.style.borderColor=af?'#4ade80':'#333';
+    d.ondrop=e=>{e.preventDefault();pick(e.dataTransfer.files[0])};
+    fi.onchange=e=>{if(e.target.files[0])pick(e.target.files[0])}}
+  const rb=$('recB');if(rb)rb.onclick=toggleRec;
 }
 
-function handleFile(f){
-  audioFile=f;
-  const drop=document.getElementById('fileDrop');
-  if(drop){drop.textContent=`${f.name} (${(f.size/1024).toFixed(1)}KB)`;drop.classList.add('has-file')}
+function pick(f){af=f;const d=$('drop');if(d){d.textContent=`${f.name} (${(f.size/1024).toFixed(1)}KB)`;d.classList.add('has')}}
+
+async function toggleRec(){
+  const b=$('recB');
+  if(!rec){
+    const s=await navigator.mediaDevices.getUserMedia({audio:true});
+    mr=new MediaRecorder(s);let ch=[];
+    mr.ondataavailable=e=>{if(e.data.size>0)ch.push(e.data)};
+    mr.onstop=()=>{s.getTracks().forEach(t=>t.stop());
+      const bl=new Blob(ch,{type:'audio/webm'});
+      af=new File([bl],'rec.webm',{type:'audio/webm'});
+      pick(af);b.textContent='Record';b.classList.remove('on')};
+    mr.start();rec=true;b.textContent='Stop';b.classList.add('on');
+  }else{mr.stop();rec=false}
 }
 
-async function toggleRecord(){
-  const btn=document.getElementById('recordBtn');
-  if(!recording){
-    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-    mediaRecorder=new MediaRecorder(stream);audioChunks=[];
-    mediaRecorder.ondataavailable=e=>{if(e.data.size>0)audioChunks.push(e.data)};
-    mediaRecorder.onstop=async()=>{
-      stream.getTracks().forEach(t=>t.stop());
-      const blob=new Blob(audioChunks,{type:'audio/webm'});
-      audioFile=new File([blob],'recording.webm',{type:'audio/webm'});
-      const drop=document.getElementById('fileDrop');
-      if(drop){drop.textContent=`recording.webm (${(blob.size/1024).toFixed(1)}KB)`;drop.classList.add('has-file')}
-      btn.textContent='🎤 Record from microphone';btn.classList.remove('recording');
-    };
-    mediaRecorder.start();recording=true;
-    btn.textContent='⏹ Stop recording';btn.classList.add('recording');
-  }else{
-    mediaRecorder.stop();recording=false;
-  }
+// Output
+function out(h){$('out').innerHTML=h;$('timingsPanel').innerHTML=''}
+function jout(st,data,ms){
+  const c=st<400?'ok':'err';
+  let h=`<div class="${c}">HTTP ${st} (${ms}ms)</div>\n${JSON.stringify(data,null,2)}`;
+  $('out').innerHTML=h;
+  // Render timings bar if present
+  if(data&&data.timings)renderTimings(data.timings);
+  else $('timingsPanel').innerHTML='';
+}
+
+function renderTimings(t){
+  const keys=['preprocess_ms','prepare_ms','prefill_ms','decode_ms','inference_ms','e2e_ms'];
+  const present=keys.filter(k=>t[k]!==undefined&&t[k]>0);
+  if(!present.length){$('timingsPanel').innerHTML='';return}
+
+  const maxVal=Math.max(...present.map(k=>t[k]),1);
+  let h='<div class="metrics-card"><h4>Request Timing Breakdown</h4>';
+  present.forEach(k=>{
+    const v=t[k];
+    const pct=Math.max((v/maxVal)*100,2);
+    const cls=v>500?'v bad':v>100?'v slow':'v';
+    h+=`<div class="metrics-row"><span class="k">${k}</span><span class="${cls}">${v.toFixed(1)}ms</span></div>`;
+  });
+  // Visual bar
+  h+='<div class="metrics-bar">';
+  present.forEach(k=>{
+    const v=t[k];const pct=Math.max((v/maxVal)*100,4);
+    const color=v>500?'#f87171':v>100?'#fbbf24':'#2563eb';
+    h+=`<div class="bar" style="height:${pct}%;width:${100/present.length}%;background:${color}" title="${k}: ${v.toFixed(1)}ms"></div>`;
+  });
+  h+='</div></div>';
+  $('timingsPanel').innerHTML=h;
 }
 
 // Senders
-function showResp(html){respBox.innerHTML=html}
-function showJson(status,data,ms){
-  const s=status<400?'status-line':'error';
-  showResp(`<div class="${s}">HTTP ${status} (${ms}ms)</div>${JSON.stringify(data,null,2)}`);
+async function get(path){
+  out('<div class="dim">Sending...</div>');
+  const t0=performance.now();
+  try{const r=await fetch(S()+path);const ms=Math.round(performance.now()-t0);
+    const ct=r.headers.get('content-type')||'';
+    if(ct.includes('json'))jout(r.status,await r.json(),ms);
+    else out(`<div class="ok">HTTP ${r.status} (${ms}ms)</div>\n${await r.text()}`)
+  }catch(e){out(`<div class="err">${e.message}</div>`)}
 }
 
-async function sendSimple(method,path){
-  showResp('<div class="timing">Sending...</div>');
+async function post(path,body){
+  out('<div class="dim">Sending...</div>');
   const t0=performance.now();
-  try{
-    const r=await fetch(S()+path,{method});
+  try{const r=await fetch(S()+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const ms=Math.round(performance.now()-t0);
     const ct=r.headers.get('content-type')||'';
-    if(ct.includes('json')){showJson(r.status,await r.json(),ms)}
-    else{showResp(`<div class="status-line">HTTP ${r.status} (${ms}ms)</div>${await r.text()}`)}
-  }catch(e){showResp(`<div class="error">Error: ${e.message}</div>`)}
+    if(ct.includes('json'))jout(r.status,await r.json(),ms);
+    else out(`<div class="ok">HTTP ${r.status} (${ms}ms)</div>\n${await r.text()}`)
+  }catch(e){out(`<div class="err">${e.message}</div>`)}
 }
 
-async function sendJson(method,path,body){
-  showResp('<div class="timing">Sending...</div>');
+async function del(path,body){
+  out('<div class="dim">Sending...</div>');
   const t0=performance.now();
-  try{
-    const r=await fetch(S()+path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const ms=Math.round(performance.now()-t0);
-    const ct=r.headers.get('content-type')||'';
-    if(ct.includes('json')){showJson(r.status,await r.json(),ms)}
-    else{showResp(`<div class="status-line">HTTP ${r.status} (${ms}ms)</div>${await r.text()}`)}
-  }catch(e){showResp(`<div class="error">Error: ${e.message}</div>`)}
+  try{const r=await fetch(S()+path,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const ms=Math.round(performance.now()-t0);jout(r.status,await r.json(),ms)
+  }catch(e){out(`<div class="err">${e.message}</div>`)}
 }
 
-async function sendTranscribe(ep){
-  if(!audioFile){showResp('<div class="error">No audio file selected. Drop a file or record.</div>');return}
-
-  const model=document.getElementById('fModel').value;
-  const lang=document.getElementById('fLang').value;
-  const fmt=document.getElementById('fFormat').value;
-
-  console.log('sendTranscribe:', ep, 'model:', model, 'lang:', lang, 'fmt:', fmt, 'file:', audioFile.name, audioFile.size+'B');
-
+async function go(){
+  if(!af){out('<div class="err">No audio file. Drop a file or record.</div>');return}
   const fd=new FormData();
-  fd.append('file',audioFile);
-  fd.append('model',model);
-  fd.append('language',lang);
-  fd.append('response_format',fmt);
-
-  const isStream=ep==='transcribe-stream';
-  if(isStream)fd.append('stream','true');
-
+  fd.append('file',af);
+  fd.append('model',$('fModel').value);
+  fd.append('language',$('fLang').value);
+  fd.append('response_format',$('fFmt').value);
+  const isSSE=ep==='stream';
+  if(isSSE)fd.append('stream','true');
   const path=ep==='translate'?'/v1/audio/translations':'/v1/audio/transcriptions';
-  const url=S()+path;
-  showResp(`<div class="timing">Sending ${audioFile.name} (${(audioFile.size/1024).toFixed(1)}KB) to ${path}...</div>`);
+  out(`<div class="dim">Sending ${af.name} (${(af.size/1024).toFixed(1)}KB)...</div>`);
   const t0=performance.now();
 
-  if(isStream){
-    // SSE streaming
+  if(isSSE){
     try{
       const r=await fetch(S()+path,{method:'POST',body:fd});
-      const ms=Math.round(performance.now()-t0);
-      let html=`<div class="status-line">HTTP ${r.status} (${ms}ms) — Streaming SSE</div>`;
-      const reader=r.body.getReader();const dec=new TextDecoder();
-      let buf='';
+      let h=`<div class="ok">HTTP ${r.status} — SSE Stream</div>`;
+      const rd=r.body.getReader(),dc=new TextDecoder();let buf='';
       while(true){
-        const{done,value}=await reader.read();
-        if(done)break;
-        buf+=dec.decode(value,{stream:true});
+        const{done,value}=await rd.read();if(done)break;
+        buf+=dc.decode(value,{stream:true});
         const lines=buf.split('\n');buf=lines.pop();
-        for(const line of lines){
-          if(line.startsWith('data: ')){
-            try{
-              const evt=JSON.parse(line.slice(6));
-              if(evt.type==='transcript.text.delta'){
-                html+=`<div class="sse-event">delta: "${evt.delta}"</div>`;
-              }else if(evt.type==='transcript.text.done'){
-                html+=`<div class="sse-event" style="border-color:#4ade80;color:#4ade80">done: "${evt.text}"</div>`;
-                if(evt.usage)html+=`<div class="timing">Usage: ${JSON.stringify(evt.usage)}</div>`;
-              }else{
-                html+=`<div class="sse-event">${JSON.stringify(evt)}</div>`;
-              }
-            }catch(e){html+=`<div>${line}</div>`}
-          }
+        for(const ln of lines){
+          if(!ln.startsWith('data: '))continue;
+          try{
+            const ev=JSON.parse(ln.slice(6));
+            if(ev.type==='transcript.text.delta')h+=`<div class="sse">delta: "${ev.delta}"</div>`;
+            else if(ev.type==='transcript.text.done'){
+              h+=`<div class="sse" style="border-color:#4ade80;color:#4ade80">done: "${ev.text}"</div>`;
+              if(ev.usage)h+=`<div class="dim">Usage: ${JSON.stringify(ev.usage)}</div>`;
+            }else h+=`<div class="sse">${JSON.stringify(ev)}</div>`;
+          }catch{}
         }
-        showResp(html);
+        $('out').innerHTML=h;
       }
-      const totalMs=Math.round(performance.now()-t0);
-      html+=`<div class="timing">Total: ${totalMs}ms</div>`;
-      showResp(html);
-    }catch(e){showResp(`<div class="error">Error: ${e.message}</div>`)}
+      h+=`<div class="dim">Total: ${Math.round(performance.now()-t0)}ms</div>`;
+      $('out').innerHTML=h;
+    }catch(e){out(`<div class="err">${e.message}</div>`)}
     return;
   }
 
-  // Non-streaming
   try{
-    console.log('Fetching:', url);
-    const r=await fetch(url,{method:'POST',body:fd});
-    console.log('Response:', r.status, r.headers.get('content-type'));
+    const r=await fetch(S()+path,{method:'POST',body:fd});
     const ms=Math.round(performance.now()-t0);
     const ct=r.headers.get('content-type')||'';
-    if(ct.includes('json')){showJson(r.status,await r.json(),ms)}
-    else{showResp(`<div class="status-line">HTTP ${r.status} (${ms}ms)</div><pre>${await r.text()}</pre>`)}
-  }catch(e){showResp(`<div class="error">Error: ${e.message}</div>`)}
+    if(ct.includes('json'))jout(r.status,await r.json(),ms);
+    else out(`<div class="ok">HTTP ${r.status} (${ms}ms)</div>\n${await r.text()}`)
+  }catch(e){out(`<div class="err">${e.message}</div>`)}
 }
 
+// Metrics
+let metricsInterval=null;
+async function getMetrics(){
+  try{
+    const r=await fetch(S()+'/api/metrics');
+    const d=await r.json();
+    renderMetricsDashboard(d);
+  }catch(e){out(`<div class="err">${e.message}</div>`)}
+}
+function autoMetrics(){
+  if(metricsInterval){clearInterval(metricsInterval);metricsInterval=null;return}
+  getMetrics();
+  metricsInterval=setInterval(getMetrics,2000);
+}
 
-renderForm('transcribe');
+function renderMetricsDashboard(d){
+  let h=`<div class="ok">Uptime: ${d.uptime_s}s</div>\n`;
+
+  // Models loaded
+  if(d.models_loaded&&d.models_loaded.length){
+    h+='\n<div class="ok">Models Loaded:</div>\n';
+    d.models_loaded.forEach(m=>{
+      h+=`  ${m.model_name} (${m.model_id})\n`;
+      h+=`    device: ${m.device}`;
+      if(m.replicas>1)h+=` x${m.replicas}`;
+      h+=`  requests: ${m.request_count||0}\n`;
+      if(m.startup_ms){
+        h+=`    startup: load=${m.startup_ms.load_ms?.toFixed(0)||'?'}ms`;
+        if(m.startup_ms.warmup_ms)h+=` warmup=${m.startup_ms.warmup_ms.toFixed(0)}ms`;
+        h+=` total=${m.startup_ms.total_ms?.toFixed(0)||'?'}ms\n`;
+      }
+    });
+  }else{
+    h+='\n<div class="dim">No models loaded yet.</div>\n';
+  }
+
+  // Request stats
+  const rq=d.requests||{};
+  h+=`\n<div class="ok">Requests: ${rq.total||0} total</div>\n`;
+
+  $('out').innerHTML=h;
+
+  // Latency cards per model
+  let cards='';
+  const bm=rq.by_model||{};
+  for(const[name,stats]of Object.entries(bm)){
+    cards+=`<div class="metrics-card"><h4>${name} (${stats.count} requests, window: ${stats.window})</h4>`;
+    const lat=stats.latency||{};
+    for(const[key,vals]of Object.entries(lat)){
+      const cls=vals.avg>500?'v bad':vals.avg>100?'v slow':'v';
+      cards+=`<div class="metrics-row">
+        <span class="k">${key}</span>
+        <span class="${cls}">avg=${vals.avg} p50=${vals.p50} p95=${vals.p95} p99=${vals.p99}</span>
+      </div>`;
+    }
+    // Bar chart of averages
+    const avgKeys=Object.entries(lat).filter(([k,v])=>v.avg>0).sort((a,b)=>b[1].avg-a[1].avg);
+    if(avgKeys.length){
+      const maxV=avgKeys[0][1].avg;
+      cards+='<div class="metrics-bar">';
+      avgKeys.forEach(([k,v])=>{
+        const pct=Math.max((v.avg/maxV)*100,4);
+        const color=v.avg>500?'#f87171':v.avg>100?'#fbbf24':'#2563eb';
+        cards+=`<div class="bar" style="height:${pct}%;width:${100/avgKeys.length}%;background:${color}" title="${k}: avg=${v.avg}ms"></div>`;
+      });
+      cards+='</div>';
+    }
+    cards+='</div>';
+  }
+  $('timingsPanel').innerHTML=cards;
+
+  // System
+  if(d.system){
+    h+=`\nSystem: v${d.system.version||'?'}`;
+    if(d.system.gpu_count)h+=` | ${d.system.gpu_count} GPU(s): ${(d.system.gpu_names||[]).join(', ')}`;
+    h+='\n';
+    $('out').innerHTML=h;
+  }
+}
+
+form('transcribe');
 </script>
 </body>
 </html>

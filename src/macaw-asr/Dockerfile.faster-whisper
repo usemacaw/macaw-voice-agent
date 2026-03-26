@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY . .
+
+RUN pip install --no-cache-dir -e ".[faster-whisper]" python-multipart
+
+ENV MACAW_ASR_MODEL=faster-whisper-small
+ENV MACAW_ASR_DEVICE=cuda:0
+ENV MACAW_ASR_LANGUAGE=pt
+
+EXPOSE 8766
+
+CMD ["macaw-asr", "serve", "--host", "0.0.0.0", "--port", "8766"]

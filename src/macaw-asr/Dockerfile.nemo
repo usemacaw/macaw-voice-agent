@@ -1,0 +1,16 @@
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /app
+COPY . .
+
+RUN pip install --no-cache-dir -e ".[parakeet]" python-multipart && \
+    pip install --no-cache-dir "nemo_toolkit[asr]>=2.0.0,<2.2.0" && \
+    pip install --no-cache-dir "torch==2.4.1" --index-url https://download.pytorch.org/whl/cu124
+
+ENV MACAW_ASR_MODEL=parakeet
+ENV MACAW_ASR_DEVICE=cuda:0
+ENV MACAW_ASR_LANGUAGE=pt
+
+EXPOSE 8766
+
+CMD ["macaw-asr", "serve", "--host", "0.0.0.0", "--port", "8766"]
