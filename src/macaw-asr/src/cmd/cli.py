@@ -45,6 +45,10 @@ def main(argv: list[str] | None = None) -> None:
     serve_parser.add_argument(
         "--port", type=int, default=8766, help="Port (default: 8766)"
     )
+    serve_parser.add_argument(
+        "--devices", type=int, default=0, metavar="N",
+        help="Number of CUDA GPUs to use (e.g. --devices 2)",
+    )
 
     # transcribe
     transcribe_parser = subparsers.add_parser("transcribe", help="Transcribe audio file")
@@ -132,8 +136,20 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         print("uvicorn is required: pip install uvicorn", file=sys.stderr)
         sys.exit(1)
 
+    import os
+    from macaw_asr.config import EngineConfig, make_devices
+
+    # CLI --devices takes priority over env var
+    if args.devices > 0:
+        os.environ["MACAW_ASR_DEVICES"] = str(args.devices)
+
+    config = EngineConfig.from_env()
+    devices = list(config.devices) if config.devices else [config.device]
+
     print(f"macaw-asr server starting on http://{args.host}:{args.port}")
-    print(f"  Docs: http://{args.host}:{args.port}/docs")
+    print(f"  Model: {config.model_name}")
+    print(f"  GPUs:  {', '.join(devices)} ({len(devices)} replica{'s' if len(devices) > 1 else ''})")
+    print(f"  Docs:  http://{args.host}:{args.port}/docs")
     uvicorn.run(
         "macaw_asr.server.app:app",
         host=args.host,

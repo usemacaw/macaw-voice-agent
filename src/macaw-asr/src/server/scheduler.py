@@ -2,6 +2,9 @@
 
 SRP: model loading, caching, eviction. Does NOT serve HTTP.
 Encapsulates loaded models — external access via methods only.
+
+Multi-GPU: when config.devices is set, replicates the model across
+N GPUs and distributes requests via round-robin.
 """
 
 from __future__ import annotations
@@ -25,16 +28,29 @@ _DEFAULT_KEEP_ALIVE_SEC = 300
 
 @dataclass
 class _RunnerRef:
-    engine: ASREngine
+    engines: list[ASREngine]
     model_id: str
     last_used: float = field(default_factory=_time.time)
     request_count: int = 0
+    _next: int = 0
+
+    @property
+    def engine(self) -> ASREngine:
+        """Primary engine (backward compat)."""
+        return self.engines[0]
+
+    def next_engine(self) -> ASREngine:
+        """Round-robin across GPU replicas."""
+        engine = self.engines[self._next % len(self.engines)]
+        self._next += 1
+        return engine
 
 
 class Scheduler(IScheduler):
     """Manages loaded models. Implements IScheduler.
 
     Encapsulation: _loaded is private. Access via methods only.
+    Multi-GPU: creates one engine per device, round-robin dispatch.
     """
 
     def __init__(
@@ -74,7 +90,7 @@ class Scheduler(IScheduler):
         if ref and ref.engine.is_started:
             ref.last_used = _time.time()
             ref.request_count += 1
-            return ref.engine
+            return ref.next_engine()
 
         # Slow path: load
         async with self._load_lock:
@@ -82,7 +98,7 @@ class Scheduler(IScheduler):
             if ref and ref.engine.is_started:
                 ref.last_used = _time.time()
                 ref.request_count += 1
-                return ref.engine
+                return ref.next_engine()
 
             # Resolve/pull if not internal model
             from macaw_asr.models.registry import is_known
@@ -94,11 +110,22 @@ class Scheduler(IScheduler):
                     logger.info("Pulling: %s", config.model_id)
                     self._registry.pull(config.model_id)
 
-            engine = ASREngine(config)
-            await engine.start()
-            self._loaded[model_id] = _RunnerRef(engine=engine, model_id=model_id, request_count=1)
-            logger.info("Model loaded: %s", model_id)
-            return engine
+            # Determine devices
+            devices = list(config.devices) if config.devices else [config.device]
+
+            # Create one engine per device
+            engines = []
+            for dev in devices:
+                dev_config = config.for_device(dev)
+                engine = ASREngine(dev_config)
+                await engine.start()
+                engines.append(engine)
+                logger.info("Model loaded on %s: %s", dev, model_id)
+
+            self._loaded[model_id] = _RunnerRef(
+                engines=engines, model_id=model_id, request_count=1,
+            )
+            return engines[0]
 
     def list_loaded(self) -> list[str]:
         return [ref.model_id for ref in self._loaded.values()]
@@ -114,10 +141,10 @@ class Scheduler(IScheduler):
         if ref:
             return ref.model_id, ref.engine.config
         # Search by short name
-        for mid, ref in self._loaded.items():
+        for mid, r in self._loaded.items():
             short = mid.split("/")[-1] if "/" in mid else mid
-            if model_id in (mid, short, ref.engine.config.model_name):
-                return ref.model_id, ref.engine.config
+            if model_id in (mid, short, r.engine.config.model_name):
+                return r.model_id, r.engine.config
         return None
 
     def iter_loaded(self):
@@ -126,10 +153,11 @@ class Scheduler(IScheduler):
             yield ref.model_id, ref.engine.config
 
     def find_engine_for_session(self, session_id: str) -> IEngine | None:
-        """Find which engine owns a session. Uses public API, no internal access."""
+        """Find which engine owns a session."""
         for ref in self._loaded.values():
-            if ref.engine.session_exists(session_id):
-                return ref.engine
+            for engine in ref.engines:
+                if engine.session_exists(session_id):
+                    return engine
         return None
 
     # ==================== Internal ====================
@@ -138,18 +166,25 @@ class Scheduler(IScheduler):
         ref = self._loaded.pop(model_id, None)
         if ref is None:
             return False
-        try:
-            await ref.engine.stop()
-            logger.info("Unloaded: %s (served %d requests)", model_id, ref.request_count)
-        except Exception as e:
-            logger.warning("Error unloading %s: %s", model_id, e)
+        for engine in ref.engines:
+            try:
+                await engine.stop()
+            except Exception as e:
+                logger.warning("Error stopping engine: %s", e)
+        logger.info(
+            "Unloaded: %s (%d replicas, %d requests)",
+            model_id, len(ref.engines), ref.request_count,
+        )
         return True
 
     async def _eviction_loop(self) -> None:
         while True:
             await asyncio.sleep(30)
             now = _time.time()
-            to_evict = [mid for mid, ref in self._loaded.items() if (now - ref.last_used) > self._keep_alive_sec]
+            to_evict = [
+                mid for mid, ref in self._loaded.items()
+                if (now - ref.last_used) > self._keep_alive_sec
+            ]
             for mid in to_evict:
                 logger.info("Evicting (TTL): %s", mid)
                 await self._unload(mid)

@@ -24,6 +24,30 @@ LANGUAGE_MAP = {
 }
 
 
+def make_devices(n: int) -> tuple[str, ...]:
+    """Generate N CUDA device strings: (cuda:0, cuda:1, ..., cuda:N-1)."""
+    if n <= 0:
+        return ()
+    return tuple(f"cuda:{i}" for i in range(n))
+
+
+def _parse_devices(value: str) -> tuple[str, ...]:
+    """Parse MACAW_ASR_DEVICES value.
+
+    Accepts:
+        ""          → ()           (no multi-GPU)
+        "2"         → ("cuda:0", "cuda:1")
+        "4"         → ("cuda:0", "cuda:1", "cuda:2", "cuda:3")
+        "cuda:0,cuda:2" → ("cuda:0", "cuda:2")  (explicit list)
+    """
+    value = value.strip()
+    if not value:
+        return ()
+    if value.isdigit():
+        return make_devices(int(value))
+    return tuple(d.strip() for d in value.split(",") if d.strip())
+
+
 @dataclass(frozen=True)
 class AudioConfig:
     """Audio format configuration."""
@@ -89,6 +113,10 @@ class EngineConfig:
     device: str = "cuda:0"
     """Device for inference (e.g. 'cuda:0', 'cpu')."""
 
+    devices: tuple[str, ...] = ()
+    """Multi-GPU: replicate model across these devices for higher throughput.
+    Empty = use single `device`. Set via MACAW_ASR_DEVICES=2 (uses cuda:0,cuda:1)."""
+
     dtype: str = "bfloat16"
     """Model dtype (e.g. 'bfloat16', 'float16', 'float32')."""
 
@@ -109,6 +137,20 @@ class EngineConfig:
         """Full language name (e.g. 'Portuguese') for model prompts."""
         return LANGUAGE_MAP.get(self.language, self.language.title())
 
+    def for_device(self, device: str) -> EngineConfig:
+        """Create a copy pinned to a single device (used by scheduler for replicas)."""
+        from dataclasses import asdict
+        d = asdict(self)
+        d["device"] = device
+        d["devices"] = ()
+        audio = d.pop("audio")
+        streaming = d.pop("streaming")
+        return EngineConfig(
+            **{k: v for k, v in d.items() if k in EngineConfig.__dataclass_fields__},
+            audio=AudioConfig(**audio),
+            streaming=StreamingConfig(**streaming),
+        )
+
     @classmethod
     def from_env(cls) -> EngineConfig:
         """Build config from environment variables.
@@ -116,6 +158,8 @@ class EngineConfig:
         Convenience for gRPC server integration. Library users
         should prefer explicit config construction.
         """
+        devices = _parse_devices(os.getenv("MACAW_ASR_DEVICES", ""))
+
         return cls(
             model_name=os.getenv("MACAW_ASR_MODEL", "qwen"),
             model_id=os.getenv(
@@ -123,6 +167,7 @@ class EngineConfig:
                 os.getenv("MACAW_ASR_MODEL_ID", "Qwen/Qwen3-ASR-0.6B"),
             ),
             device=os.getenv("QWEN_DEVICE", os.getenv("MACAW_ASR_DEVICE", "cuda:0")),
+            devices=devices,
             dtype=os.getenv("MACAW_ASR_DTYPE", "bfloat16"),
             language=os.getenv("MACAW_ASR_LANGUAGE", "pt"),
             max_inference_workers=int(
