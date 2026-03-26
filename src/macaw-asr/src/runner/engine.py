@@ -107,15 +107,44 @@ class ASREngine(IEngine):
     # ==================== Batch ====================
 
     async def transcribe(self, pcm_data: bytes) -> str:
+        result = await self.transcribe_with_metrics(pcm_data)
+        return result.text
+
+    async def transcribe_with_metrics(self, pcm_data: bytes) -> TranscribeResult:
+        """Transcribe with full timing breakdown."""
+        from macaw_asr.models.types import TranscribeResult
+
         self._ensure_started()
         if not pcm_data:
-            return ""
+            return TranscribeResult(text="")
 
+        t_total = _time.perf_counter()
+
+        t0 = _time.perf_counter()
         float_audio = self._preprocessor.process(pcm_data)
+        preprocess_ms = (_time.perf_counter() - t0) * 1000
+
+        t0 = _time.perf_counter()
         inputs = await run_in_executor(self._executor, self._model.prepare_inputs, float_audio, "")
+        prepare_ms = (_time.perf_counter() - t0) * 1000
+
         strategy = self.create_strategy()
+
+        t0 = _time.perf_counter()
         output = await run_in_executor(self._executor, self._model.generate, inputs, strategy)
-        return clean_asr_text(output.text)
+        inference_ms = (_time.perf_counter() - t0) * 1000
+
+        text = clean_asr_text(output.text)
+        e2e_ms = (_time.perf_counter() - t_total) * 1000
+
+        timings = {
+            "preprocess_ms": round(preprocess_ms, 2),
+            "inference_ms": round(inference_ms, 2),
+            "e2e_ms": round(e2e_ms, 2),
+            **{k: round(v, 2) for k, v in output.timings.items()},
+        }
+
+        return TranscribeResult(text=text, timings=timings)
 
     # ==================== Streaming SSE (fix #1/#2: public method, uses executor) ====================
 

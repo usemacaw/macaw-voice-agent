@@ -31,6 +31,9 @@ logger = logging.getLogger("macaw-asr.server")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import time as _time
+    from macaw_asr.server.metrics import MetricsCollector
+
     config = EngineConfig.from_env()
     scheduler = Scheduler()
     await scheduler.start()
@@ -38,6 +41,8 @@ async def lifespan(app: FastAPI):
     # Store in app.state — no globals (fix #3)
     app.state.scheduler = scheduler
     app.state.default_config = config
+    app.state.metrics = MetricsCollector()
+    app.state.start_time = _time.time()
 
     logger.info("macaw-asr server started (model=%s)", config.model_name)
     yield

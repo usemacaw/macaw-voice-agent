@@ -52,8 +52,14 @@ async def transcribe(request: Request):
     if stream:
         return await _handle_stream(engine, config, audio_f32, file_sr, duration)
 
-    text = await engine.transcribe(pcm)
-    return _format(text, config, duration, fmt, temp)
+    result = await engine.transcribe_with_metrics(pcm)
+
+    # Record metrics
+    metrics = getattr(request.app.state, "metrics", None)
+    if metrics:
+        metrics.record(config.model_name, result.timings)
+
+    return _format(result.text, config, duration, fmt, temp, result.timings)
 
 
 @router.post("/translations")
@@ -120,11 +126,11 @@ async def _parse_audio(request, default_config, force_language=""):
     return audio_f32, sr, duration, config, fmt, temp, stream
 
 
-def _format(text, config, duration, fmt, temp):
+def _format(text, config, duration, fmt, temp, timings=None):
     if fmt == "text":
         return PlainTextResponse(text)
     if fmt == "verbose_json":
-        return {
+        resp = {
             "task": "transcribe", "language": config.language,
             "duration": round(duration, 2), "text": text,
             "segments": [{"id": 0, "seek": 0, "start": 0.0, "end": round(duration, 2),
@@ -132,6 +138,9 @@ def _format(text, config, duration, fmt, temp):
                           "avg_logprob": 0.0, "compression_ratio": 1.0, "no_speech_prob": 0.0}],
             "usage": {"type": "duration", "seconds": int(duration) + 1},
         }
+        if timings:
+            resp["timings"] = timings
+        return resp
     if fmt == "srt":
         h, m, s = int(duration // 3600), int((duration % 3600) // 60), duration % 60
         ts = f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
@@ -140,7 +149,10 @@ def _format(text, config, duration, fmt, temp):
         h, m, s = int(duration // 3600), int((duration % 3600) // 60), duration % 60
         ts = f"{h:02d}:{m:02d}:{s:06.3f}"
         return PlainTextResponse(f"WEBVTT\n\n00:00:00.000 --> {ts}\n{text}\n", media_type="text/vtt")
-    return {"text": text, "usage": {"type": "duration", "seconds": int(duration) + 1}}
+    resp = {"text": text, "usage": {"type": "duration", "seconds": int(duration) + 1}}
+    if timings:
+        resp["timings"] = timings
+    return resp
 
 
 async def _handle_stream(engine, config, audio_f32_input, file_sr, duration):
