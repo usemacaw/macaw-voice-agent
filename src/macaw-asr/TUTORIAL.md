@@ -1,6 +1,6 @@
 # macaw-asr — Tutorial
 
-Guia completo para o time. Cobre instalacao, todos os modelos, API e troubleshooting.
+Guia completo para o time. Cobre instalacao, todos os modelos, API, multi-GPU e troubleshooting.
 
 ## Indice
 
@@ -12,11 +12,14 @@ Guia completo para o time. Cobre instalacao, todos os modelos, API e troubleshoo
    - [Whisper (HuggingFace)](#whisper-huggingface)
    - [Qwen3-ASR](#qwen3-asr)
    - [Parakeet (NVIDIA NeMo)](#parakeet-nvidia-nemo)
-5. [API Server](#api-server)
-6. [Usando com OpenAI SDK](#usando-com-openai-sdk)
-7. [Formatos de resposta](#formatos-de-resposta)
-8. [Compatibilidade de versoes](#compatibilidade-de-versoes)
-9. [Troubleshooting](#troubleshooting)
+   - [FastConformer PT-BR](#fastconformer-pt-br)
+   - [Canary 1B v2](#canary-1b-v2)
+5. [Multi-GPU](#multi-gpu)
+6. [API Server](#api-server)
+7. [Usando com OpenAI SDK](#usando-com-openai-sdk)
+8. [Formatos de resposta](#formatos-de-resposta)
+9. [Compatibilidade de versoes](#compatibilidade-de-versoes)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -28,6 +31,7 @@ macaw-asr e um servidor ASR (speech-to-text) que:
 - Expoe a **mesma API do OpenAI** (`/v1/audio/transcriptions`)
 - Funciona como o **Ollama, mas para ASR**: `pull`, `serve`, `list`
 - Cada modelo instala **apenas suas proprias dependencias**
+- Suporta **multi-GPU** com replicacao e round-robin
 
 ```
 pip install macaw-asr               # Core leve (~5MB)
@@ -54,6 +58,16 @@ pip install macaw-asr
 
 Isso instala apenas: numpy, pydantic, fastapi, uvicorn. Nenhum modelo funciona ainda — voce escolhe qual instalar.
 
+### Instalar por familia de modelo
+
+```bash
+pip install macaw-asr[faster-whisper]    # CTranslate2 (~200MB, sem PyTorch)
+pip install macaw-asr[whisper]           # PyTorch + transformers (~5GB)
+pip install macaw-asr[qwen]             # PyTorch + transformers + qwen-asr (~5GB)
+pip install macaw-asr[parakeet]         # PyTorch + NeMo (~5GB)
+pip install macaw-asr[all]              # Tudo
+```
+
 ### Verificar modelos disponiveis
 
 ```bash
@@ -67,10 +81,10 @@ NAME                      FAMILY           SIZE     DEPS
 ----------------------------------------------------------------------
 qwen                      qwen             0.6B     missing (pip install "macaw-asr[qwen]")
 whisper-tiny              whisper          39M      missing (pip install "macaw-asr[whisper]")
-whisper-small             whisper          244M     missing (pip install "macaw-asr[whisper]")
-faster-whisper-tiny       faster-whisper   39M      missing (pip install "macaw-asr[faster-whisper]")
-faster-whisper-small      faster-whisper   244M     missing (pip install "macaw-asr[faster-whisper]")
+faster-whisper-small      faster-whisper   244M     ok
 parakeet                  parakeet         0.6B     missing (pip install "macaw-asr[parakeet]")
+fastconformer-pt          parakeet         115M     missing (pip install "macaw-asr[parakeet]")
+canary                    parakeet         1.0B     missing (pip install "macaw-asr[parakeet]")
 ...
 ```
 
@@ -84,6 +98,7 @@ A coluna DEPS mostra `ok` ou o comando exato para instalar.
 macaw-asr pull <modelo>        # Baixa pesos do modelo
 macaw-asr serve                # Inicia servidor HTTP na porta 8766
 macaw-asr serve --port 9000   # Porta customizada
+macaw-asr serve --devices 2   # Multi-GPU (2 replicas)
 macaw-asr transcribe <arquivo> # Transcreve direto (sem servidor)
 macaw-asr list                 # Lista modelos baixados localmente
 macaw-asr list --all           # Lista TODOS os modelos disponiveis
@@ -102,10 +117,10 @@ macaw-asr pull faster-whisper-small
 Se faltar dependencia, ele avisa antes de baixar:
 
 ```bash
-macaw-asr pull qwen
-# Resolved: qwen -> Qwen/Qwen3-ASR-0.6B (family: qwen)
-# Missing dependencies: torch, transformers, qwen_asr
-# Install with: pip install "macaw-asr[qwen]"
+macaw-asr pull canary
+# Resolved: canary -> nvidia/canary-1b-v2 (family: parakeet)
+# Missing dependencies: torch, nemo
+# Install with: pip install "macaw-asr[parakeet]"
 ```
 
 ---
@@ -341,6 +356,148 @@ Inferencia:   ~30ms
 
 ---
 
+### FastConformer PT-BR
+
+**O que e:** Modelo NVIDIA especializado em portugues brasileiro. FastConformer Hybrid (Transducer+CTC) com pontuacao e capitalizacao automatica. 115M params — leve e rapido.
+
+**Quando usar:** Quando precisa de ASR **dedicado para PT-BR** com pontuacao, e quer um modelo leve.
+
+| Modelo | Params | VRAM | Qualidade PT-BR |
+|--------|--------|------|-----------------|
+| `fastconformer-pt` | 115M | ~1GB | Excelente (WER 12% MCV) |
+
+**Instalacao e uso:**
+
+```bash
+# 1. Instalar dependencias (mesma do Parakeet)
+pip install macaw-asr[parakeet]
+
+# 2. Baixar modelo
+macaw-asr pull fastconformer-pt
+
+# 3. Servir
+MACAW_ASR_MODEL=fastconformer-pt macaw-asr serve
+
+# 4. Testar
+curl -F file=@audio.wav -F model=whisper-1 http://localhost:8766/v1/audio/transcriptions
+```
+
+**Performance (RTX 4090, audio 1s):**
+
+```
+Start (cold): ~19s (download + NeMo init)
+Inferencia:   ~30ms
+```
+
+**Detalhes tecnicos:**
+- HuggingFace ID: `nvidia/stt_pt_fastconformer_hybrid_large_pc`
+- Arquitetura: FastConformer encoder + Hybrid Transducer/CTC decoder
+- Pontuacao automatica: ponto, virgula, interrogacao
+- Capitalizacao automatica
+- Tokenizer: SentencePiece (128 tokens)
+- Licenca: CC-BY-NC-4.0 (uso nao-comercial)
+
+---
+
+### Canary 1B v2
+
+**O que e:** Modelo multilingual da NVIDIA com 978M params. Suporta 25 idiomas + traducao entre idiomas. O mais capaz do lineup.
+
+**Quando usar:** Quando precisa de ASR **multilingual**, traducao de fala, ou qualidade maxima com pontuacao.
+
+| Modelo | Params | VRAM | Idiomas |
+|--------|--------|------|---------|
+| `canary` | 1.0B | ~6GB | 25 (PT, EN, ES, FR, DE, ...) |
+
+**Instalacao e uso:**
+
+```bash
+# 1. Instalar dependencias (mesma do Parakeet)
+pip install macaw-asr[parakeet]
+
+# 2. Baixar modelo
+macaw-asr pull canary
+
+# 3. Servir
+MACAW_ASR_MODEL=canary macaw-asr serve
+
+# 4. Testar
+curl -F file=@audio.wav -F model=whisper-1 http://localhost:8766/v1/audio/transcriptions
+```
+
+**Performance (RTX 4090, audio 1s):**
+
+```
+Start (cold): ~74s (modelo grande, primeiro download)
+Start (warm): ~19s
+Inferencia:   ~460ms
+```
+
+**Detalhes tecnicos:**
+- HuggingFace ID: `nvidia/canary-1b-v2`
+- Arquitetura: FastConformer encoder (32 layers) + Transformer decoder (8 layers)
+- 25 idiomas europeus (incluindo PT — portugues europeu)
+- Traducao de fala: qualquer idioma suportado para/de ingles
+- Pontuacao e capitalizacao automatica
+- Suporta timestamps por palavra e por segmento
+- Licenca: CC-BY-4.0 (uso comercial permitido)
+
+**Nota:** O Canary usa tokens especiais internos (`<|en|>`, `<|pnc|>`, etc.) que sao automaticamente limpos pelo macaw-asr antes de retornar o texto.
+
+---
+
+## Multi-GPU
+
+O macaw-asr suporta replicacao de modelo em multiplas GPUs com distribuicao round-robin automatica. Cada GPU roda uma copia independente do modelo, e as requests sao distribuidas entre elas.
+
+### Uso
+
+```bash
+# 2 GPUs
+macaw-asr serve --devices 2
+
+# 4 GPUs
+macaw-asr serve --devices 4
+
+# Via variavel de ambiente
+MACAW_ASR_DEVICES=2 macaw-asr serve
+
+# Lista explicita (power users)
+MACAW_ASR_DEVICES=cuda:0,cuda:2 macaw-asr serve
+```
+
+### Como funciona
+
+```
+Request 1 → cuda:0
+Request 2 → cuda:1
+Request 3 → cuda:0
+Request 4 → cuda:1
+...
+```
+
+O scheduler cria N engines (uma por GPU), e distribui requests via round-robin. Nao muda nada na API — as requests sao distribuidas automaticamente.
+
+### Startup com multi-GPU
+
+```
+macaw-asr server starting on http://0.0.0.0:8766
+  Model: faster-whisper-small
+  GPUs:  cuda:0, cuda:1 (2 replicas)
+  Docs:  http://0.0.0.0:8766/docs
+```
+
+### Quando usar
+
+- **1 GPU:** Suficiente para a maioria dos casos. Modelos ASR sao pequenos (< 2GB VRAM).
+- **2+ GPUs:** Quando throughput e importante (muitas requests simultaneas). Cada GPU processa requests independentemente.
+
+### Nota
+
+Multi-GPU e sobre **throughput** (mais requests por segundo), nao sobre velocidade de uma unica request. Um request individual nao fica mais rapido com mais GPUs.
+
+---
+
 ## API Server
 
 ### Iniciar
@@ -352,8 +509,8 @@ macaw-asr serve
 # Modelo especifico
 MACAW_ASR_MODEL=faster-whisper-small macaw-asr serve
 
-# Porta e host customizados
-macaw-asr serve --host 0.0.0.0 --port 9000
+# Porta, host e multi-GPU
+macaw-asr serve --host 0.0.0.0 --port 9000 --devices 2
 ```
 
 ### Endpoints
@@ -393,11 +550,14 @@ curl -F file=@audio.wav -F model=whisper-1 -F stream=true \
 | Variavel | Padrao | Descricao |
 |----------|--------|-----------|
 | `MACAW_ASR_MODEL` | `qwen` | Nome do modelo no registry |
-| `MACAW_ASR_MODEL_ID` | `Qwen/Qwen3-ASR-0.6B` | ID HuggingFace |
+| `MACAW_ASR_MODEL_ID` | *(auto)* | ID HuggingFace (resolvido do registry se omitido) |
 | `MACAW_ASR_DEVICE` | `cuda:0` | Device de inferencia |
-| `MACAW_ASR_DTYPE` | `bfloat16` | Dtype do modelo |
+| `MACAW_ASR_DEVICES` | *(vazio)* | Multi-GPU: numero de GPUs ou lista (ex: `2` ou `cuda:0,cuda:1`) |
+| `MACAW_ASR_DTYPE` | *(auto)* | Dtype do modelo (resolvido do registry se omitido) |
 | `MACAW_ASR_LANGUAGE` | `pt` | Idioma padrao |
 | `MACAW_ASR_HOME` | `~/.macaw-asr` | Diretorio de modelos locais |
+
+**Nota:** `MACAW_ASR_MODEL_ID` e `MACAW_ASR_DTYPE` sao resolvidos automaticamente a partir do registry quando voce define apenas `MACAW_ASR_MODEL`. Por exemplo, `MACAW_ASR_MODEL=faster-whisper-small` automaticamente resolve para `model_id=openai/whisper-small` e `dtype=float16`.
 
 ---
 
@@ -479,14 +639,16 @@ curl -F file=@audio.wav -F model=whisper-1 -F response_format=vtt \
 | **whisper** | >= 2.0 | >= 4.40 | - |
 | **qwen** | >= 2.0 | >= 4.40 | `qwen-asr` |
 | **parakeet** | 2.4.x - 2.5.x | - | `nemo_toolkit[asr] >= 2.0, < 2.2` |
+| **fastconformer-pt** | 2.4.x - 2.5.x | - | `nemo_toolkit[asr] >= 2.0, < 2.2` |
+| **canary** | 2.4.x - 2.5.x | - | `nemo_toolkit[asr] >= 2.0, < 2.2` |
 
-### Combinacoes testadas em producao
+### Combinacoes testadas
 
-| Ambiente | torch | NeMo | Status |
-|----------|-------|------|--------|
-| Vast.ai RTX 4090, torch 2.4.1 | 2.4.1+cu124 | 2.1.0 | Todos 5/5 PASS |
-| Vast.ai RTX 4090, torch 2.11.0 | 2.11.0+cu130 | - | 4/5 (parakeet incompativel) |
-| Vast.ai RTX 3090, torch 2.4.1 | 2.4.1+cu124 | 2.1.0 | Todos OK (producao) |
+| Ambiente | torch | NeMo | Modelos testados | Status |
+|----------|-------|------|------------------|--------|
+| RTX 4090, torch 2.4.1 | 2.4.1+cu124 | 2.1.0 | faster-whisper, whisper, qwen, parakeet, fastconformer-pt, canary | Todos PASS |
+| RTX 4090, torch 2.11.0 | 2.11.0+cu130 | - | faster-whisper, whisper, qwen | 3/3 PASS (NeMo incompativel) |
+| RTX 3090, torch 2.4.1 | 2.4.1+cu124 | 2.1.0 | Todos | OK (producao) |
 
 ### Recomendacao de ambiente
 
@@ -531,9 +693,9 @@ macaw-asr pull faster-whisper-small
 
 ### "GPU mel failed, falling back to CPU"
 
-Qwen3-ASR com torch >= 2.11 tem um bug no `_torch_extract_fbank_features`. O sistema faz fallback automatico para CPU. Funciona perfeitamente, ~13ms mais lento por request. Nao e um erro critico.
+Qwen3-ASR com torch >= 2.11 tem um bug no `_torch_extract_fbank_features`. O sistema faz fallback automatico para CPU. Funciona perfeitamente, apenas ~13ms mais lento por request. Nao e um erro critico.
 
-### "module 'torch.nn' has no attribute 'Buffer'" (Parakeet)
+### "module 'torch.nn' has no attribute 'Buffer'" (NeMo)
 
 NeMo 2.7+ requer torch >= 2.6. Se voce esta com torch 2.4.x:
 
@@ -541,7 +703,7 @@ NeMo 2.7+ requer torch >= 2.6. Se voce esta com torch 2.4.x:
 pip install "nemo_toolkit[asr]>=2.0.0,<2.2.0"
 ```
 
-### "INTERNAL ASSERT FAILED" / "CUDA error" (Parakeet)
+### "INTERNAL ASSERT FAILED" / "CUDA error" (NeMo)
 
 NeMo 2.7+ com torch 2.11 causa CUDA errors. Use torch 2.4.x-2.5.x com NeMo < 2.2:
 
@@ -549,6 +711,20 @@ NeMo 2.7+ com torch 2.11 causa CUDA errors. Use torch 2.4.x-2.5.x com NeMo < 2.2
 pip install "torch==2.4.1" --index-url https://download.pytorch.org/whl/cu124
 pip install "nemo_toolkit[asr]>=2.0.0,<2.2.0"
 ```
+
+### "cuDNN error: CUDNN_STATUS_NOT_INITIALIZED"
+
+Problema de hardware/drivers na maquina GPU. Modelos com RNN (FastConformer Hybrid, Canary) precisam de cuDNN funcional. Teste com:
+
+```python
+import torch
+rnn = torch.nn.LSTM(10, 20, 1).cuda()
+x = torch.randn(5, 3, 10).cuda()
+out, _ = rnn(x)
+print("cuDNN OK")
+```
+
+Se falhar, troque de maquina/instancia. O macaw-asr carrega modelos NeMo na CPU primeiro e depois move pra GPU para minimizar esse problema.
 
 ### "torchvision has no attribute 'extension'"
 
@@ -589,10 +765,13 @@ Para mudar o diretorio: `export MACAW_ASR_HOME=/outro/caminho`
 
 | Cenario | Modelo recomendado | Motivo |
 |---------|--------------------|--------|
-| **Producao (latencia baixa)** | `faster-whisper-small` | 2ms inferencia, sem PyTorch |
+| **Producao (latencia baixa)** | `faster-whisper-small` | 2ms inferencia, sem PyTorch, ~200MB install |
 | **Producao (qualidade maxima)** | `faster-whisper-large` | Melhor Whisper, sem PyTorch |
 | **PT-BR (melhor qualidade)** | `parakeet` | Top 1 Open ASR Leaderboard |
+| **PT-BR (leve + pontuacao)** | `fastconformer-pt` | 115M params, pontuacao automatica, WER 12% |
+| **Multilingual (25 idiomas)** | `canary` | 978M params, traducao, pontuacao |
 | **Streaming real-time** | `qwen` | Unico com SSE token-by-token |
 | **Ambiente sem GPU** | `faster-whisper-tiny` | Roda em CPU (lento mas funciona) |
 | **Pesquisa / fine-tuning** | `whisper-small` | Acesso direto ao modelo PyTorch |
 | **Install mais leve** | `faster-whisper-*` | ~200MB total (sem PyTorch) |
+| **Alto throughput** | qualquer + `--devices N` | Multi-GPU round-robin |
