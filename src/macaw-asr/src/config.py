@@ -159,16 +159,34 @@ class EngineConfig:
         should prefer explicit config construction.
         """
         devices = _parse_devices(os.getenv("MACAW_ASR_DEVICES", ""))
+        model_name = os.getenv("MACAW_ASR_MODEL", "qwen")
+
+        # Resolve model_id from registry if not explicitly set
+        model_id = os.getenv("QWEN_STT_MODEL", os.getenv("MACAW_ASR_MODEL_ID", ""))
+        if not model_id:
+            try:
+                from macaw_asr.models.registry import get as get_meta
+                meta = get_meta(model_name)
+                model_id = meta.model_id if meta else "Qwen/Qwen3-ASR-0.6B"
+            except Exception:
+                model_id = "Qwen/Qwen3-ASR-0.6B"
+
+        # Resolve dtype from registry if using default
+        dtype = os.getenv("MACAW_ASR_DTYPE", "")
+        if not dtype:
+            try:
+                from macaw_asr.models.registry import get as get_meta
+                meta = get_meta(model_name)
+                dtype = meta.dtype if meta else "bfloat16"
+            except Exception:
+                dtype = "bfloat16"
 
         return cls(
-            model_name=os.getenv("MACAW_ASR_MODEL", "qwen"),
-            model_id=os.getenv(
-                "QWEN_STT_MODEL",
-                os.getenv("MACAW_ASR_MODEL_ID", "Qwen/Qwen3-ASR-0.6B"),
-            ),
+            model_name=model_name,
+            model_id=model_id,
             device=os.getenv("QWEN_DEVICE", os.getenv("MACAW_ASR_DEVICE", "cuda:0")),
             devices=devices,
-            dtype=os.getenv("MACAW_ASR_DTYPE", "bfloat16"),
+            dtype=dtype,
             language=os.getenv("MACAW_ASR_LANGUAGE", "pt"),
             max_inference_workers=int(
                 os.getenv("MACAW_ASR_INFERENCE_WORKERS", "2")
