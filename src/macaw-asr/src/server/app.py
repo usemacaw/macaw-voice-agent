@@ -88,9 +88,6 @@ def get_default_config(request: Request) -> EngineConfig:
 
 def resolve_config(model: str, language: str, default_config: EngineConfig) -> EngineConfig:
     """Build config from request params + defaults. Guards against None."""
-    from dataclasses import asdict
-    from macaw_asr.config import AudioConfig, StreamingConfig
-
     if not model:
         if not language:
             return default_config
@@ -118,14 +115,7 @@ def resolve_config(model: str, language: str, default_config: EngineConfig) -> E
     if language:
         kwargs["language"] = language
 
-    base = asdict(default_config)
-    audio = base.pop("audio")
-    streaming = base.pop("streaming")
-    base.update(kwargs)
-    return EngineConfig(
-        **{k: v for k, v in base.items() if k in EngineConfig.__dataclass_fields__},
-        audio=AudioConfig(**audio), streaming=StreamingConfig(**streaming),
-    )
+    return default_config.replace(**kwargs)
 
 
 # ==================== Wire Routers ====================

@@ -140,8 +140,8 @@ class Scheduler(IScheduler):
         ref = self._loaded.get(model_id)
         if ref:
             return ref.model_id, ref.engine.config
-        # Search by short name
-        for mid, r in self._loaded.items():
+        # Search by short name — snapshot to avoid dict mutation during iteration
+        for mid, r in list(self._loaded.items()):
             short = mid.split("/")[-1] if "/" in mid else mid
             if model_id in (mid, short, r.engine.config.model_name):
                 return r.model_id, r.engine.config
@@ -149,12 +149,12 @@ class Scheduler(IScheduler):
 
     def iter_loaded(self):
         """Iterate loaded models safely. Yields (model_id, engine_config)."""
-        for ref in self._loaded.values():
+        for ref in list(self._loaded.values()):
             yield ref.model_id, ref.engine.config
 
     def find_engine_for_session(self, session_id: str) -> IEngine | None:
         """Find which engine owns a session."""
-        for ref in self._loaded.values():
+        for ref in list(self._loaded.values()):
             for engine in ref.engines:
                 if engine.session_exists(session_id):
                     return engine
@@ -170,7 +170,7 @@ class Scheduler(IScheduler):
             try:
                 await engine.stop()
             except Exception as e:
-                logger.warning("Error stopping engine: %s", e)
+                logger.warning("Error stopping engine: %s", e, exc_info=True)
         logger.info(
             "Unloaded: %s (%d replicas, %d requests)",
             model_id, len(ref.engines), ref.request_count,

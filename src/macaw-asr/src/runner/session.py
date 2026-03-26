@@ -86,18 +86,24 @@ class StreamingSession(ISession):
             return self._text
 
         t0 = _time.perf_counter()
-        float_chunk = pcm_to_float32(pcm_chunk)
+        try:
+            float_chunk = pcm_to_float32(pcm_chunk)
+        except ValueError:
+            logger.warning("Malformed PCM chunk (%d bytes), skipping", len(pcm_chunk))
+            return self._text
         self._metrics.total_resample_ms += (_time.perf_counter() - t0) * 1000
 
         self._raw_buffer.append(float_chunk)
         self._raw_samples += len(float_chunk)
         self._samples_since_trigger += len(float_chunk)
 
-        # Fix #9: cap buffer size to prevent unbounded growth
+        # Cap buffer: discard oldest chunks until within limit
         if self._raw_samples > self._max_samples:
-            logger.warning("Session %s exceeded max duration, truncating", self._session_id[:8])
-            self._raw_buffer = self._raw_buffer[-1:]  # keep only last chunk
-            self._raw_samples = len(self._raw_buffer[0]) if self._raw_buffer else 0
+            while self._raw_samples > self._max_samples and len(self._raw_buffer) > 1:
+                removed = self._raw_buffer.pop(0)
+                self._raw_samples -= len(removed)
+            logger.warning("Session %s exceeded max duration, trimmed to %ds",
+                           self._session_id[:8], self._raw_samples // self._input_rate)
 
         should_trigger = self._samples_since_trigger >= self._trigger_samples
         if should_trigger:

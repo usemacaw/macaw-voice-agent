@@ -11,8 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import queue
-import threading
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Request
@@ -74,6 +72,7 @@ async def translate(request: Request):
     try:
         engine = await scheduler.get_runner(config)
     except Exception as e:
+        logger.error("Failed to get runner: %s", e, exc_info=True)
         raise HTTPException(500, detail=str(e))
 
     text = await engine.transcribe(pcm)
@@ -145,30 +144,32 @@ def _format(text, config, duration, fmt, temp):
 
 
 async def _handle_stream(engine, config, audio_f32_input, file_sr, duration):
-    """Fix #1/#2: Uses engine.transcribe_stream() via executor — no raw threads."""
+    """SSE streaming via asyncio.Queue — no raw threads, no event loop blocking."""
     model_rate = config.audio.model_sample_rate
     input_sr = config.audio.input_sample_rate
     audio_model = resample(audio_f32_input, input_sr, model_rate) if input_sr != model_rate else audio_f32_input
 
     async def sse():
-        q = queue.Queue()
+        loop = asyncio.get_event_loop()
+        q: asyncio.Queue = asyncio.Queue()
 
         def _run():
+            """Runs in thread pool — feeds results into async queue."""
             try:
                 gen = engine.transcribe_stream(audio_model)
                 for delta, done, out in gen:
-                    q.put((delta, done, out))
+                    loop.call_soon_threadsafe(q.put_nowait, (delta, done, out))
             except Exception as e:
-                logger.error("Stream decode failed", exc_info=True)  # Fix: log stack trace
-                q.put(("__ERROR__", True, str(e)))
+                logger.error("Stream decode failed", exc_info=True)
+                loop.call_soon_threadsafe(q.put_nowait, ("__ERROR__", True, str(e)))
 
-        threading.Thread(target=_run, daemon=True).start()
+        loop.run_in_executor(None, _run)
 
         full = ""
         while True:
             try:
-                delta, done, out = q.get(timeout=60)
-            except queue.Empty:
+                delta, done, out = await asyncio.wait_for(q.get(), timeout=60)
+            except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'error': 'inference timeout'})}\n\n"
                 break
             if delta == "__ERROR__":
@@ -180,7 +181,6 @@ async def _handle_stream(engine, config, audio_f32_input, file_sr, duration):
             if done:
                 yield f"data: {json.dumps({'type': 'transcript.text.done', 'text': clean_asr_text(full), 'usage': {'type': 'duration', 'seconds': int(duration) + 1}})}\n\n"
                 break
-            await asyncio.sleep(0)
 
     return StreamingResponse(sse(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

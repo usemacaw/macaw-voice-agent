@@ -91,16 +91,18 @@ class ASREngine(IEngine):
     async def stop(self) -> None:
         if not self._started:
             return
-        for sid in list(self._sessions):
-            await self._cancel_session(sid)
-        if self._model:
-            await run_in_executor(self._executor, self._model.unload)
-            self._model = None
-        if self._executor:
-            self._executor.shutdown(wait=True)  # Fix: wait for pending tasks
-            self._executor = None
-        self._started = False
-        logger.info("ASREngine stopped")
+        try:
+            for sid in list(self._sessions):
+                await self._cancel_session(sid)
+            if self._model:
+                await run_in_executor(self._executor, self._model.unload)
+                self._model = None
+        finally:
+            if self._executor:
+                self._executor.shutdown(wait=True)
+                self._executor = None
+            self._started = False
+            logger.info("ASREngine stopped")
 
     # ==================== Batch ====================
 
@@ -147,6 +149,9 @@ class ASREngine(IEngine):
 
     async def create_session(self, session_id: str = "") -> None:
         self._ensure_started()
+        if not session_id:
+            import uuid
+            session_id = str(uuid.uuid4())
         self._sessions[session_id] = StreamingSession(
             session_id=session_id, model=self._model,
             preprocessor=self._preprocessor, strategy=self.create_strategy(),

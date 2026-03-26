@@ -110,34 +110,26 @@ def engine_config() -> EngineConfig:
 # ==================== Engine Fixture ====================
 
 
-_engine_instance: ASREngine | None = None
-
-
-@pytest.fixture
+@pytest.fixture(scope="session")
 async def engine(engine_config) -> ASREngine:
-    """Shared engine. Starts once, reused across tests."""
-    global _engine_instance
-    if _engine_instance is None or not _engine_instance.is_started:
-        _engine_instance = ASREngine(engine_config)
-        await _engine_instance.start()
-    return _engine_instance
+    """Session-scoped engine. Starts once, reused across all tests."""
+    eng = ASREngine(engine_config)
+    await eng.start()
+    yield eng
+    await eng.stop()
 
 
 # ==================== Model Fixture (for direct model tests) ====================
 
 
-_model_instance = None
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def model(engine_config):
-    """Loaded ASRModel instance. Reused within a test module."""
-    global _model_instance
-    if _model_instance is None:
-        _model_instance = create_model(engine_config.model_name)
-        _model_instance.load(engine_config)
-        _model_instance.warmup()
-    return _model_instance
+    """Session-scoped loaded ASRModel. Reused across all tests."""
+    m = create_model(engine_config.model_name)
+    m.load(engine_config)
+    m.warmup()
+    yield m
+    m.unload()
 
 
 # ==================== Audio Generators ====================
@@ -147,8 +139,8 @@ def make_pcm(duration_sec: float, freq: float = 440.0, sr: int = INPUT_SR) -> by
     """Generate PCM16 tone at given freq/duration/sr."""
     n = int(duration_sec * sr)
     t = np.linspace(0, duration_sec, n, endpoint=False)
-    wave = (np.sin(2 * np.pi * freq * t) * 16000).astype(np.int16)
-    return wave.tobytes()
+    samples = (np.sin(2 * np.pi * freq * t) * 16000).astype(np.int16)
+    return samples.tobytes()
 
 
 def make_silence(duration_sec: float, sr: int = INPUT_SR) -> bytes:

@@ -30,7 +30,7 @@ def decode_audio(data: bytes, filename: str = "") -> tuple[np.ndarray, int]:
         ValueError: If audio cannot be decoded.
     """
     if not data:
-        return np.zeros(0, dtype=np.float32), 16000
+        raise ValueError("Empty audio data")
 
     # Try soundfile first (handles wav, flac, ogg, mp3 via libsndfile)
     try:
@@ -40,8 +40,10 @@ def decode_audio(data: bytes, filename: str = "") -> tuple[np.ndarray, int]:
             audio = audio[:, 0]  # mono
         logger.debug("Decoded via soundfile: %.1fs @ %dHz", len(audio) / sr, sr)
         return audio, sr
-    except Exception:
+    except ImportError:
         pass
+    except Exception as e:
+        logger.debug("soundfile decode failed: %s", e)
 
     # Try wave module (stdlib, wav only)
     try:
@@ -64,8 +66,8 @@ def decode_audio(data: bytes, filename: str = "") -> tuple[np.ndarray, int]:
             audio = samples.astype(np.float32) / (2 ** (sw * 8 - 1))
             logger.debug("Decoded via wave: %.1fs @ %dHz", len(audio) / sr, sr)
             return audio, sr
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("wave decode failed: %s", e)
 
     # Try librosa via temp file (handles mp3, webm, etc. via ffmpeg)
     # librosa/ffmpeg needs a real file for some formats like webm

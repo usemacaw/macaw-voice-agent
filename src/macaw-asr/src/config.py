@@ -137,19 +137,22 @@ class EngineConfig:
         """Full language name (e.g. 'Portuguese') for model prompts."""
         return LANGUAGE_MAP.get(self.language, self.language.title())
 
-    def for_device(self, device: str) -> EngineConfig:
-        """Create a copy pinned to a single device (used by scheduler for replicas)."""
+    def replace(self, **kwargs) -> EngineConfig:
+        """Create a copy with overridden fields. Frozen-safe replacement for dataclasses.replace."""
         from dataclasses import asdict
         d = asdict(self)
-        d["device"] = device
-        d["devices"] = ()
         audio = d.pop("audio")
         streaming = d.pop("streaming")
+        d.update(kwargs)
         return EngineConfig(
             **{k: v for k, v in d.items() if k in EngineConfig.__dataclass_fields__},
             audio=AudioConfig(**audio),
             streaming=StreamingConfig(**streaming),
         )
+
+    def for_device(self, device: str) -> EngineConfig:
+        """Create a copy pinned to a single device (used by scheduler for replicas)."""
+        return self.replace(device=device, devices=())
 
     @classmethod
     def from_env(cls) -> EngineConfig:
@@ -161,30 +164,29 @@ class EngineConfig:
         devices = _parse_devices(os.getenv("MACAW_ASR_DEVICES", ""))
         model_name = os.getenv("MACAW_ASR_MODEL", "qwen")
 
-        # Resolve model_id from registry if not explicitly set
-        model_id = os.getenv("QWEN_STT_MODEL", os.getenv("MACAW_ASR_MODEL_ID", ""))
-        if not model_id:
-            try:
-                from macaw_asr.models.registry import get as get_meta
-                meta = get_meta(model_name)
-                model_id = meta.model_id if meta else "Qwen/Qwen3-ASR-0.6B"
-            except Exception:
-                model_id = "Qwen/Qwen3-ASR-0.6B"
-
-        # Resolve dtype from registry if using default
+        # Resolve model_id and dtype from registry if not explicitly set
+        model_id = os.getenv("MACAW_ASR_MODEL_ID", "")
         dtype = os.getenv("MACAW_ASR_DTYPE", "")
-        if not dtype:
+        if not model_id or not dtype:
             try:
                 from macaw_asr.models.registry import get as get_meta
                 meta = get_meta(model_name)
-                dtype = meta.dtype if meta else "bfloat16"
-            except Exception:
-                dtype = "bfloat16"
+                if meta:
+                    if not model_id:
+                        model_id = meta.model_id
+                    if not dtype:
+                        dtype = meta.dtype
+            except ImportError:
+                pass
+        if not model_id:
+            model_id = "Qwen/Qwen3-ASR-0.6B"
+        if not dtype:
+            dtype = "bfloat16"
 
         return cls(
             model_name=model_name,
             model_id=model_id,
-            device=os.getenv("QWEN_DEVICE", os.getenv("MACAW_ASR_DEVICE", "cuda:0")),
+            device=os.getenv("MACAW_ASR_DEVICE", "cuda:0"),
             devices=devices,
             dtype=dtype,
             language=os.getenv("MACAW_ASR_LANGUAGE", "pt"),
