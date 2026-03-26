@@ -15,11 +15,12 @@ Guia completo para o time. Cobre instalacao, todos os modelos, API, multi-GPU e 
    - [FastConformer PT-BR](#fastconformer-pt-br)
    - [Canary 1B v2](#canary-1b-v2)
 5. [Multi-GPU](#multi-gpu)
-6. [API Server](#api-server)
-7. [Usando com OpenAI SDK](#usando-com-openai-sdk)
-8. [Formatos de resposta](#formatos-de-resposta)
-9. [Compatibilidade de versoes](#compatibilidade-de-versoes)
-10. [Troubleshooting](#troubleshooting)
+6. [Docker](#docker)
+7. [API Server](#api-server)
+8. [Usando com OpenAI SDK](#usando-com-openai-sdk)
+9. [Formatos de resposta](#formatos-de-resposta)
+10. [Compatibilidade de versoes](#compatibilidade-de-versoes)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -495,6 +496,93 @@ macaw-asr server starting on http://0.0.0.0:8766
 ### Nota
 
 Multi-GPU e sobre **throughput** (mais requests por segundo), nao sobre velocidade de uma unica request. Um request individual nao fica mais rapido com mais GPUs.
+
+---
+
+## Docker
+
+Tres Dockerfiles prontos, um por familia de dependencia. Zero configuracao — cada imagem ja vem com tudo instalado.
+
+### Imagens disponiveis
+
+| Imagem | Dockerfile | Modelos | Tamanho | GPU? |
+|--------|-----------|---------|---------|------|
+| `macaw-asr:faster-whisper` | `Dockerfile.faster-whisper` | faster-whisper-tiny/small/medium/large | ~400MB | Opcional |
+| `macaw-asr:torch` | `Dockerfile.torch` | whisper-tiny/small/medium/large + qwen | ~6GB | Sim |
+| `macaw-asr:nemo` | `Dockerfile.nemo` | parakeet + parakeet-ctc + fastconformer-pt + canary | ~8GB | Sim |
+
+### Build
+
+```bash
+cd src/macaw-asr
+
+# Faster-Whisper (leve, sem torch)
+docker build -f Dockerfile.faster-whisper -t macaw-asr:faster-whisper .
+
+# Whisper + Qwen (PyTorch)
+docker build -f Dockerfile.torch -t macaw-asr:torch .
+
+# Parakeet + FastConformer + Canary (NeMo)
+docker build -f Dockerfile.nemo -t macaw-asr:nemo .
+```
+
+### Run
+
+```bash
+# Faster-Whisper (modelo padrao: faster-whisper-small)
+docker run --gpus all -p 8766:8766 macaw-asr:faster-whisper
+
+# Trocar modelo via env var
+docker run --gpus all -p 8766:8766 -e MACAW_ASR_MODEL=faster-whisper-large macaw-asr:faster-whisper
+
+# Whisper HuggingFace
+docker run --gpus all -p 8766:8766 -e MACAW_ASR_MODEL=whisper-small macaw-asr:torch
+
+# Qwen3-ASR (streaming)
+docker run --gpus all -p 8766:8766 -e MACAW_ASR_MODEL=qwen macaw-asr:torch
+
+# Parakeet (melhor PT-BR)
+docker run --gpus all -p 8766:8766 -e MACAW_ASR_MODEL=parakeet macaw-asr:nemo
+
+# Canary (multilingual)
+docker run --gpus all -p 8766:8766 -e MACAW_ASR_MODEL=canary macaw-asr:nemo
+
+# Multi-GPU
+docker run --gpus all -p 8766:8766 -e MACAW_ASR_MODEL=faster-whisper-small -e MACAW_ASR_DEVICES=2 macaw-asr:faster-whisper
+```
+
+### Persistir modelos (evitar re-download)
+
+```bash
+# Montar cache de modelos como volume
+docker run --gpus all -p 8766:8766 \
+  -v ~/.macaw-asr:/root/.macaw-asr \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  macaw-asr:faster-whisper
+```
+
+### Testar
+
+```bash
+# Health check
+curl http://localhost:8766/
+
+# Transcrever
+curl -F file=@audio.wav -F model=whisper-1 http://localhost:8766/v1/audio/transcriptions
+
+# Metricas
+curl http://localhost:8766/api/metrics
+```
+
+### Qual imagem escolher?
+
+| Cenario | Imagem |
+|---------|--------|
+| **Producao (rapido + leve)** | `macaw-asr:faster-whisper` |
+| **Streaming real-time** | `macaw-asr:torch` (qwen) |
+| **Melhor qualidade PT-BR** | `macaw-asr:nemo` (parakeet) |
+| **Multilingual / traducao** | `macaw-asr:nemo` (canary) |
+| **Sem GPU** | `macaw-asr:faster-whisper` (roda em CPU) |
 
 ---
 
