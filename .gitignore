@@ -1,21 +1,53 @@
+# Python
 .venv
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.db
-*.sqlite3
-*.log
-.DS_Store
-.idea/
-.vscode/
-*.env
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg   
-models/
+
+# Node
 node_modules/
+
+# Environment / secrets
+*.env
+!*.env.example
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# ML models (binários pesados)
+*.onnx
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.ggml
+src/api/models/
+src/api/audio/models/
+
+# Repos de referência (clonados para estudo)
+referencias/
+
+
+# Misc
 continue.txt
+
 # Claude Code
 .claude/settings.local.json
